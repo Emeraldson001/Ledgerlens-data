@@ -24,11 +24,24 @@ CUSUMDetector
     .update(value)   -> bool   (True = alarm just triggered)
     .is_alarm        -> bool
     .acknowledge()
+
+PerPairCUSUMTracker (issue #971)
+    .update(pair, value) -> PerPairAlarm | None
+    .is_alarm(pair)      -> bool
+    .acknowledge(pair)
+    .pairs               -> list[str]
+
+PerPairCUSUMTracker maintains an independent CUSUMDetector per trading pair so
+that a distribution shift confined to a single thinly-traded pair is detected
+even when the aggregate metric remains flat. Each detector is labelled with a
+pair-scoped metric name (``<metric>:<pair>``) so Prometheus and Redis state stay
+isolated per pair.
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 from prometheus_client import Gauge
 
@@ -43,6 +56,22 @@ _cusum_alarm_gauge = Gauge(
 )
 
 _REDIS_KEY_PREFIX = "ledgerlens:cusum:"
+
+
+@dataclass(frozen=True)
+class PerPairAlarm:
+    """Pair-level CUSUM alarm payload (issue #971).
+
+    Carries the pair identifier, the metric that degraded, the direction of the
+    shift and the magnitude of the CUSUM statistic that crossed the threshold so
+    downstream alert routing can include pair-level context.
+    """
+
+    pair: str
+    metric: str
+    direction: str  # "high" or "low"
+    magnitude: float
+    threshold: float
 
 
 class CUSUMDetector:
@@ -160,3 +189,102 @@ class CUSUMDetector:
             self._redis.set(key, "1" if state else "0")
         except Exception as exc:
             logger.warning("Failed to persist CUSUM alarm state to Redis: %s", exc)
+
+
+class PerPairCUSUMTracker:
+    """Per-pair rolling CUSUM tracking for model-degradation detection (#971).
+
+    Maintains one :class:`CUSUMDetector` per trading pair, each labelled with a
+    pair-scoped metric name so Prometheus series and Redis alarm state remain
+    isolated. This lets a distribution shift confined to a single pair be
+    detected even when the aggregate metric stays flat.
+
+    Args:
+        metric_name: Base metric name (e.g. ``"model_auc"``).
+        target_mean: Expected in-control mean (μ₀) shared by all pairs.
+        allowable_slack: Allowable slack k shared by all pairs.
+        decision_threshold: Alarm threshold h shared by all pairs.
+        redis_client: Optional ``redis.Redis`` instance for alarm persistence.
+    """
+
+    def __init__(
+        self,
+        metric_name: str = "model_metric",
+        target_mean: float | None = None,
+        allowable_slack: float | None = None,
+        decision_threshold: float | None = None,
+        redis_client=None,
+    ) -> None:
+        self.metric_name = metric_name
+        self._target_mean = target_mean
+        self._allowable_slack = allowable_slack
+        self._decision_threshold = decision_threshold
+        self._redis = redis_client
+        self._detectors: dict[str, CUSUMDetector] = {}
+
+    def _detector_for(self, pair: str) -> CUSUMDetector:
+        detector = self._detectors.get(pair)
+        if detector is None:
+            detector = CUSUMDetector(
+                metric_name=f"{self.metric_name}:{pair}",
+                target_mean=self._target_mean,
+                allowable_slack=self._allowable_slack,
+                decision_threshold=self._decision_threshold,
+                redis_client=self._redis,
+            )
+            self._detectors[pair] = detector
+        return detector
+
+    def update(self, pair: str, value: float) -> PerPairAlarm | None:
+        """Ingest one observation for ``pair``.
+
+        Returns a :class:`PerPairAlarm` when the pair's CUSUM statistic crosses
+        the decision threshold, otherwise ``None``. Stable pairs return ``None``
+        and never affect other pairs' statistics.
+        """
+        detector = self._detector_for(pair)
+        # Capture the statistic that is about to cross before update() resets it.
+        prev_high = detector.s_high
+        prev_low = detector.s_low
+        triggered = detector.update(value)
+        if not triggered:
+            return None
+
+        # update() resets statistics on alarm, so recompute the crossing value
+        # from the pre-update statistic plus the current observation.
+        high_after = max(0.0, prev_high + value - (detector.mu0 + detector.k))
+        low_after = max(0.0, prev_low - value + (detector.mu0 - detector.k))
+        if high_after >= low_after:
+            direction, magnitude = "high", high_after
+        else:
+            direction, magnitude = "low", low_after
+
+        alarm = PerPairAlarm(
+            pair=pair,
+            metric=self.metric_name,
+            direction=direction,
+            magnitude=magnitude,
+            threshold=detector.h,
+        )
+        logger.warning(
+            "Per-pair CUSUM alarm: pair=%s metric=%s direction=%s magnitude=%.2f h=%.2f",
+            pair,
+            self.metric_name,
+            direction,
+            magnitude,
+            detector.h,
+        )
+        return alarm
+
+    def is_alarm(self, pair: str) -> bool:
+        detector = self._detectors.get(pair)
+        return detector.is_alarm if detector is not None else False
+
+    def acknowledge(self, pair: str) -> None:
+        detector = self._detectors.get(pair)
+        if detector is not None:
+            detector.acknowledge()
+
+    @property
+    def pairs(self) -> list[str]:
+        return list(self._detectors.keys())
