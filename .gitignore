@@ -257,3 +257,28 @@ alerts_dlq.ndjson
 
 # Grafana provisioning secrets
 monitoring/grafana/provisioning/datasources/*.yaml
+
+# Issue #952-955 additions -----------------------------------------------
+
+# Additional snapshot patterns (belt-and-suspenders)
+__snapshots__/
+**/__pycache__/
+*.pyc
+
+# Tox virtualenv artefacts
+.tox/
+
+# Benchmark raw outputs (keep .md reports; exclude generated data files)
+benchmarks/*.json
+benchmarks/*.csv
+
+# Model binary artefacts (any location, not just models/)
+*.joblib
+*.pkl
+*.h5
+
+# Data files at repo root (not just data/ subdir)
+!data/dataset_card.md
+
+# reports/ keep-marker
+!reports/.gitkeep
