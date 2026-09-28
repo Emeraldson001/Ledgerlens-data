@@ -13,6 +13,7 @@ __pycache__/
 .pytest_cache/
 .hypothesis/
 *.snap               # test snapshots (e.g. syrupy)
+__snapshots__/
 tests/__snapshots__/
 tests/**/*.snap
 */__snapshots__/
