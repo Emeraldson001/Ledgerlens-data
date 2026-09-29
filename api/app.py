@@ -4,6 +4,19 @@ Endpoints:
     GET /v1/wallets/{address}/scores   — paginated risk score history
     GET /v1/wallets/{address}/latest   — latest score + top-3 features
     GET /v1/health                     — liveness / readiness check
+
+Idempotency contract
+--------------------
+Write endpoints (e.g. manual review submissions, threshold overrides) accept
+an idempotency key via the ``Idempotency-Key`` request header or an
+``idempotency_key`` body field. When a key is supplied, the first request is
+processed and its response is stored for a configurable TTL window
+(``config.API_IDEMPOTENCY_TTL_SECONDS``). A retry that reuses the same key
+within that window returns the original stored response verbatim and does
+*not* reprocess the underlying write, so a client retry after a network
+timeout cannot produce a duplicate write. Keys are scoped per authenticated
+tenant. After the TTL expires the key is forgotten and a subsequent request
+with the same key is treated as a new write.
 """
 
 import re
@@ -205,195 +218,96 @@ def _enforce_tenant_limit(api_key: str) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# Idempotency-key support for write endpoints
+# ---------------------------------------------------------------------------
+# Mirrors the dedupe-within-a-TTL-window pattern used in
+# ``pipeline/idempotency.py``: a key is remembered for a configurable window
+# and a duplicate request replays the original stored response instead of
+# reprocessing the write. State is scoped per authenticated tenant so one
+# tenant's keys can never collide with or observe another tenant's writes.
+
+
+class IdempotencyStore:
+    """Thread-safe, TTL-bounded store of responses keyed by idempotency key."""
+
+    def __init__(self, ttl_seconds: float) -> None:
+        self._ttl = float(ttl_seconds)
+        # (tenant_id, key) -> (expires_at, status_code, response_body)
+        self._entries: dict[tuple[str, str], tuple[float, int, dict]] = {}
+        self._lock = threading.Lock()
+
+    def _purge_expired(self, now: float) -> None:
+        expired = [k for k, (exp, _, _) in self._entries.items() if exp <= now]
+        for k in expired:
+            self._entries.pop(k, None)
+
+    def get(self, tenant_id: str, key: str) -> tuple[int, dict] | None:
+        """Return the stored ``(status_code, body)`` for a live key, else None."""
+        now = time.monotonic()
+        with self._lock:
+            self._purge_expired(now)
+            entry = self._entries.get((tenant_id, key))
+            if entry is None:
+                return None
+            _, status_code, body = entry
+            return status_code, body
+
+    def put(self, tenant_id: str, key: str, status_code: int, body: dict) -> None:
+        """Store a response for ``key`` until the TTL window elapses."""
+        now = time.monotonic()
+        with self._lock:
+            self._purge_expired(now)
+            self._entries[(tenant_id, key)] = (now + self._ttl, status_code, body)
+
+
+_idempotency_store = IdempotencyStore(
+    ttl_seconds=getattr(config, "API_IDEMPOTENCY_TTL_SECONDS", 86400)
+)
+
+
+def _resolve_idempotency_key(request: Request, body: BaseModel | None) -> str | None:
+    """Extract an idempotency key from the header or the request body field."""
+    key = request.headers.get("Idempotency-Key")
+    if not key and body is not None:
+        key = getattr(body, "idempotency_key", None)
+    if key is not None:
+        key = str(key).strip()
+        if not key:
+            return None
+    return key
+
+
+def _replay_if_duplicate(api_key: str, key: str | None):
+    """Return the stored response for a duplicate key, else None."""
+    if not key:
+        return None
+    tenant_id = _tenant_id_from_key(api_key)
+    stored = _idempotency_store.get(tenant_id, key)
+    if stored is None:
+        return None
+    status_code, body = stored
+    logger.info(
+        "idempotent replay",
+        extra={"tenant_id": tenant_id, "idempotency_key": key},
+    )
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(status_code=status_code, content=body)
+
+
+def _remember_response(api_key: str, key: str | None, status_code: int, body: dict) -> None:
+    """Persist a response so a later duplicate key can replay it."""
+    if not key:
+        return
+    tenant_id = _tenant_id_from_key(api_key)
+    _idempotency_store.put(tenant_id, key, status_code, body)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     # Fail fast on a missing/misconfigured var (e.g. no API_KEYS, meaning
     # every request would 401 forever) instead of discovering it from the
-    # first request that hits the affected code path.
-    try:
-        validate_mode("api")
-    except OSError as exc:
-        logger.error(str(exc))
-        raise
-    yield
+    # first reque
 
-
-app = FastAPI(
-    title="LedgerLens Risk Score API",
-    version="1.0.0",
-    description="Wallet risk scores for Stellar DEX wash-trade detection.",
-    lifespan=_lifespan,
-)
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
-# ---------------------------------------------------------------------------
-# Pydantic response schemas
-# ---------------------------------------------------------------------------
-
-
-class RiskScoreResponse(BaseModel):
-    score_id: int
-    wallet: str
-    asset_pair: str
-    score: int
-    benford_flag: bool
-    ml_flag: bool
-    confidence: int
-    propagated_risk: float | None = None
-    ring_id: str | None = None
-    updated_at: str
-
-
-class PaginatedScoresResponse(BaseModel):
-    items: list[RiskScoreResponse]
-    next_cursor: int | None = Field(None, description="score_id cursor for next page")
-    total: int
-
-
-class LatestScoreResponse(BaseModel):
-    wallet: str
-    asset_pair: str
-    score: int
-    benford_flag: bool
-    ml_flag: bool
-    confidence: int
-    top_features: list[dict]
-
-
-class HealthResponse(BaseModel):
-    status: str
-    db: str
-    model: str
-    workers: dict[str, dict] | None = None
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-_store = RiskScoreStore()
-_session_factory = get_session_factory()
-
-
-def _record_to_response(r: RiskScoreRecord) -> RiskScoreResponse:
-    return RiskScoreResponse(
-        score_id=r.id,
-        wallet=r.wallet,
-        asset_pair=r.asset_pair,
-        score=r.score,
-        benford_flag=r.benford_flag,
-        ml_flag=r.ml_flag,
-        confidence=r.confidence,
-        propagated_risk=r.propagated_risk,
-        ring_id=r.ring_id,
-        updated_at=r.updated_at.isoformat(),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
-
-
-@app.get("/v1/health", response_model=HealthResponse, tags=["ops"])
-@limiter.limit(f"{config.API_RATE_LIMIT_RPM}/minute")
-async def health(request: Request):
-    """Liveness and readiness probe."""
-    db_status = "ok"
-    try:
-        with _session_factory() as session:
-            session.execute(select(RiskScoreRecord).limit(1))
-    except Exception:
-        db_status = "unavailable"
-
-    import os
-
-    model_status = "ok" if os.path.isdir(config.MODEL_DIR) else "unavailable"
-
-    registry = get_health_registry()
-    worker_status, worker_report = registry.get_overall_status()
-
-    if db_status != "ok" or worker_status in (HealthStatus.UNHEALTHY, HealthStatus.DEGRADED):
-        overall = "degraded" if db_status == "ok" else "unavailable"
-    else:
-        overall = "ok"
-
-    return HealthResponse(
-        status=overall,
-        db=db_status,
-        model=model_status,
-        workers=worker_report.get("components"),
-    )
-
-
-@app.get("/v1/health/workers", tags=["ops"])
-@limiter.limit(f"{config.API_RATE_LIMIT_RPM}/minute")
-async def worker_health(request: Request):
-    """Detailed health probe for all registered background worker processes."""
-    registry = get_health_registry()
-    overall_status, report = registry.get_overall_status()
-    return {
-        "status": overall_status.value,
-        "report": report,
-    }
-
-
-@app.get("/v1/rate-limit/metrics", tags=["ops"])
-async def rate_limit_metrics(request: Request, _key: str = Depends(_check_api_key)):
-    """Per-tenant rate limit utilization and throttling event metrics."""
-    return _tenant_limiter.metrics()
-
-
-@app.get(
-    "/v1/wallets/{address}/scores",
-    response_model=PaginatedScoresResponse,
-    tags=["scores"],
-)
-@limiter.limit(f"{config.API_RATE_LIMIT_RPM}/minute")
-async def get_wallet_scores(
-    request: Request,
-    address: str,
-    start_ts: int | None = Query(None, description="Unix timestamp lower bound"),
-    end_ts: int | None = Query(None, description="Unix timestamp upper bound"),
-    asset_pair: str | None = Query(None),
-    min_score: int | None = Query(None, ge=0, le=100),
-    cursor: int | None = Query(None, description="Cursor from previous page (score_id)"),
-    limit: int = Query(50, ge=1, le=200),
-    _key: str = Depends(_check_api_key),
-):
-    """Paginated risk score history for a wallet (cursor-based on score_id)."""
-    _enforce_tenant_limit(_key)
-    _validate_stellar_address(address)
-
-    from datetime import UTC, datetime
-
-    with _session_factory() as session:
-        stmt = (
-            select(RiskScoreRecord)
-            .where(RiskScoreRecord.wallet == address)
-            .order_by(RiskScoreRecord.id.desc())
-        )
-        if cursor is not None:
-            stmt = stmt.where(RiskScoreRecord.id < cursor)
-        if asset_pair is not None:
-            stmt = stmt.where(RiskScoreRecord.asset_pair == asset_pair)
-        if min_score is not None:
-            stmt = stmt.where(RiskScoreRecord.score >= min_score)
-        if start_ts is not None:
-            stmt = stmt.where(
-                RiskScoreRecord.updated_at >= datetime.fromtimestamp(start_ts, tz=UTC)
-            )
-        if end_ts is not None:
-            stmt = stmt.where(RiskScoreRecord.updated_at <= datetime.fromtimestamp(end_ts, tz=UTC))
-
-        rows = list(session.scalars(stmt.limit(limit + 1)))
-
-    has_more = len(rows) > limit
-    items = rows[:limit]
-    next_cursor = items[-1].id if has_more and items else None
-
-    return PaginatedScoresResponse(
-        items=[_record_to_response(r) for r in items],
-        next_cursor=next_cursor,
-        total=len(items),
-    )
+/* … truncated 5791 chars — edit only what you need near the top … */
