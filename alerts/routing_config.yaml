@@ -69,6 +69,48 @@ rules:
         target: "${WATCHDOG_DEADMAN_WEBHOOK_URL}"
         severity_label: critical
 
+# Automated runbook execution policy for well-understood incident classes (#929).
+#
+# Consumed by monitoring.incident_responder to decide whether a matched
+# incident class may be remediated automatically, and under which rollout
+# mode. Rollout is staged: `dry_run` -> `approval_required` -> `full`.
+#   - dry_run:            log the runbook that *would* run; take no action.
+#   - approval_required:  queue the runbook for manual approval before it runs.
+#   - full:               execute the runbook automatically.
+# Every automated action (and every dry-run/approval decision) is written to
+# the audit log with the incident class, runbook, mode, and triggering context
+# so post-incident review has a complete trail.
+#
+# Only incident classes with a well-established, low-risk runbook belong here.
+# Each entry names the incident class, the runbook to execute, the rollout
+# mode, and the blast-radius guardrails the responder must respect.
+automated_runbooks:
+  mode: dry_run
+  incident_classes:
+    # Stuck consumer group: a specific consumer group has stopped making
+    # progress while the broker is healthy. Restarting the group is a
+    # well-understood, low-risk remediation.
+    - name: stuck_consumer_group
+      runbook: restart_consumer_group
+      mode: dry_run
+      params:
+        consumer_group: "${STUCK_CONSUMER_GROUP}"
+      guardrails:
+        max_restarts_per_hour: 3
+        require_broker_healthy: true
+
+    # Stale detection worker: a detection worker has not emitted a heartbeat
+    # within its expected interval but the process is still registered.
+    # Restarting the worker is a well-understood, low-risk remediation.
+    - name: stale_detection_worker
+      runbook: restart_detection_worker
+      mode: dry_run
+      params:
+        worker_id: "${STALE_WORKER_ID}"
+      guardrails:
+        max_restarts_per_hour: 3
+        require_no_active_incident: true
+
 # Used when no rule above matches at all.
 default_destinations:
   - channel: webhook
