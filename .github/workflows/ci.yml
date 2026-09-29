@@ -110,6 +110,11 @@ jobs:
       - name: Validate documentation internal links (Issue #512)
         run: python -m scripts.validate_docs
 
+      - name: Feature label / dictionary consistency check (Issue #946)
+        run: python scripts/check_feature_label_consistency.py
+        # Exits 1 if any key in reporting/feature_labels.FEATURE_LABELS is
+        # missing a corresponding entry in data/feature_dictionary.md.
+
       - name: Check import cycles (Issue #546)
         run: |
           python scripts/check_import_cycles.py
@@ -282,6 +287,12 @@ jobs:
 
       - name: Check Avro schema compatibility
         run: make check-schema-compatibility
+
+      - name: Check report schema compatibility (Issue #947)
+        run: python scripts/check_report_schema_compatibility.py
+        # Exits 1 on breaking changes to reporting/schemas/*.json.
+        # See docs/report_schema_deprecation_policy.md for the allowed change
+        # categories and the version-bump procedure.
 
       # -----------------------------------------------------------------------
       # Issue #545 — Static analysis gates (mypy + bandit + radon)

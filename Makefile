@@ -96,6 +96,12 @@ PR_BODY_FILE ?=
 check-schema-compatibility:
 	$(PYTHON) scripts/check_schema_compatibility.py
 
+check-feature-labels:
+	$(PYTHON) scripts/check_feature_label_consistency.py
+
+check-report-schemas:
+	$(PYTHON) scripts/check_report_schema_compatibility.py
+
 check-review-gates:
 	@{ \
 		git diff --name-only $(BASE)...HEAD; \

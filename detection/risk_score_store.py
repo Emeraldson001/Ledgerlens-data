@@ -81,7 +81,6 @@ class RiskScoreStore:
                             index_elements=["wallet", "asset_pair"],
                             set_=update_columns,
                         )
-                    )
                     if existing is None:
                         existing = RiskScoreRecord(wallet=wallet, asset_pair=asset_pair)
                         session.add(existing)
