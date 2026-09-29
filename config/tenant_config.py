@@ -14,6 +14,21 @@ class TenantConfig:
     asset_pair_whitelist: list[str]
     threshold_strategy: str = "static"
     threshold_config: dict[str, Any] = field(default_factory=dict)
+    rate_limit: "RateLimitConfig | None" = None
+
+
+@dataclass
+class RateLimitConfig:
+    """Per-tenant rate limit settings.
+
+    ``rate`` is the sustained token refill rate in requests per second and
+    ``burst`` is the maximum bucket capacity (i.e. the largest burst of
+    requests allowed at once). Both are per tenant so that one tenant's
+    high-volume usage cannot degrade availability for other tenants.
+    """
+
+    rate: float
+    burst: int
 
 
 class TenantNotFoundError(Exception):
@@ -22,6 +37,33 @@ class TenantNotFoundError(Exception):
 
 _tenant_configs: dict[str, TenantConfig] = {}
 _allowed_tenant_ids: set[str] = set()
+
+
+def _parse_rate_limit(cfg: dict[str, Any]) -> RateLimitConfig | None:
+    """Parse an optional per-tenant ``rate_limit`` block.
+
+    Accepts either a nested mapping::
+
+        rate_limit:
+          rate: 50
+          burst: 100
+
+    or a shorthand string such as ``"50/s"`` / ``"50"`` (burst defaults to
+    the rate). Returns ``None`` when no override is configured, in which case
+    the API falls back to its default per-tenant limit.
+    """
+    raw = cfg.get("rate_limit")
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        rate = float(raw["rate"])
+        burst = int(raw.get("burst", rate))
+        return RateLimitConfig(rate=rate, burst=burst)
+    if isinstance(raw, str):
+        rate = float(raw.rstrip("/s"))
+        return RateLimitConfig(rate=rate, burst=int(rate))
+    rate = float(raw)
+    return RateLimitConfig(rate=rate, burst=int(rate))
 
 
 def load_tenants_config(path: str = "config/tenants.yaml") -> None:
@@ -36,6 +78,7 @@ def load_tenants_config(path: str = "config/tenants.yaml") -> None:
             asset_pair_whitelist=cfg["asset_pair_whitelist"],
             threshold_strategy=cfg.get("threshold_strategy", "static"),
             threshold_config=cfg.get("threshold_config", {}),
+            rate_limit=_parse_rate_limit(cfg),
         )
         for tid, cfg in data.get("tenants", {}).items()
     }
@@ -46,6 +89,11 @@ def get_tenant_config(tenant_id: str) -> TenantConfig:
     if tenant_id not in _allowed_tenant_ids:
         raise TenantNotFoundError(f"Unknown tenant ID: {tenant_id}")
     return _tenant_configs[tenant_id]
+
+
+def get_tenant_rate_limit(tenant_id: str) -> RateLimitConfig | None:
+    """Return the configured per-tenant rate limit override, if any."""
+    return get_tenant_config(tenant_id).rate_limit
 
 
 def build_threshold_strategy(tenant_id: str) -> Any:
