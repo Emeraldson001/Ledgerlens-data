@@ -904,3 +904,8 @@ MIT
 *Built for the Stellar ecosystem. Open source. Community owned.*
 
 </div>
+
+## Handsoff notes
+
+<!-- handsoff-issue-878 -->
+- #878: MPC aggregator: add dropout-resilient secret reconstruction
