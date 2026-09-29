@@ -41,6 +41,34 @@ rules:
         target: "#acme-wash-trade-alerts"
         severity_label: default
 
+  # Emergency watchdog self-test / dead-man's-switch (#928).
+  #
+  # The watchdog emits a heartbeat to an external, independently-monitored
+  # endpoint on a fixed interval. If that heartbeat is missed, the external
+  # monitor (outside the primary monitoring stack, so a failure of the
+  # primary stack cannot mask a dead watchdog) fires this rule. It is
+  # intentionally `stop_on_match: true` so a missed watchdog heartbeat is
+  # never diluted by other routing rules and always reaches the on-call
+  # pager plus the external dead-man's-switch webhook.
+  #
+  # Escalation path for a missed watchdog heartbeat:
+  #   1. External monitor detects a missed heartbeat and fires this rule.
+  #   2. PagerDuty `ledgerlens-watchdog` pages the primary on-call engineer.
+  #   3. If unacknowledged within the documented SLA, PagerDuty escalates to
+  #      the secondary on-call and the platform lead.
+  #   4. On-call confirms whether the watchdog process is alive; if dead,
+  #      restart it and follow the incident runbook in docs/alerting.md.
+  - name: watchdog-heartbeat-missed
+    detectors: ["emergency_watchdog_heartbeat"]
+    stop_on_match: true
+    destinations:
+      - channel: pagerduty
+        target: "ledgerlens-watchdog"
+        severity_label: critical
+      - channel: webhook
+        target: "${WATCHDOG_DEADMAN_WEBHOOK_URL}"
+        severity_label: critical
+
 # Used when no rule above matches at all.
 default_destinations:
   - channel: webhook
