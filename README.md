@@ -904,3 +904,8 @@ MIT
 *Built for the Stellar ecosystem. Open source. Community owned.*
 
 </div>
+
+## Handsoff notes
+
+<!-- handsoff-issue-935 -->
+- #935: Grafana dashboards: add a single 'detection pipeline health' overview dashboard
