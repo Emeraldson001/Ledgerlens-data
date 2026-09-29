@@ -24,6 +24,14 @@ test_output/
 # Fuzz corpus (generated at runtime — keep only hand-crafted seeds in VCS)
 tests/fuzz/corpus/generated/
 
+# Generated maturity report and per-module badges (Issue #958)
+# Regenerate with: make maturity-report
+docs/maturity_report.md
+docs/badges/
+
+# Secret-scan reports (generated at runtime — Issue #956)
+reports/secrets_scan_*.json
+
 # Virtual environments
 .venv/
 venv/
