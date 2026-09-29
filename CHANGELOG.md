@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Schema registry integration with compatibility-mode enforcement
+  (`ingestion/avro_codec.py`, issue #914): `HorizonKafkaProducer` now registers
+  its Avro schema before publishing, with a Confluent-compatible Schema
+  Registry (`SCHEMA_REGISTRY_URL`) or the in-process `SchemaRegistry`.
+  Registration enforces `SCHEMA_COMPATIBILITY_MODE` (`NONE`/`BACKWARD`/
+  `FORWARD`/`FULL`, default `BACKWARD`) and raises `SchemaCompatibilityError`
+  for a breaking change. See `docs/schema_registry_runbook.md`.
 - Single, authenticated, cryptographically-gated model promotion/rollback path
   (`detection/model_governance.py`, issue #671): `RiskScorer` now hard-blocks
   on any model that fails Ed25519 signature or transparency-log verification

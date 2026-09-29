@@ -130,12 +130,21 @@ Services that consume from the Kafka topic should:
 
 ## SchemaRegistry API
 
-```python
-from ingestion.avro_codec import SchemaRegistry, load_schema
+Producers register their schema before publishing, and the configured
+`SCHEMA_COMPATIBILITY_MODE` (`NONE`, `BACKWARD`, `FORWARD` or `FULL`, default
+`BACKWARD`) is enforced at registration time. Set `SCHEMA_REGISTRY_URL` to use a
+Confluent-compatible Schema Registry (`ConfluentSchemaRegistry`); otherwise the
+in-process `SchemaRegistry` below applies the same rules. See
+[`docs/schema_registry_runbook.md`](../docs/schema_registry_runbook.md) for the
+operational procedure.
 
-registry = SchemaRegistry()
-fp_v1 = registry.register(load_schema("data/trade_avro_schema_v1.json"))
-fp_v2 = registry.register(load_schema("data/trade_avro_schema.json"))
+```python
+from ingestion.avro_codec import SchemaRegistry, read_schema
+
+registry = SchemaRegistry("BACKWARD")
+fp_v1 = registry.register(read_schema("data/trade_avro_schema_v1.json"))
+# Raises SchemaCompatibilityError if v2 breaks BACKWARD compatibility with v1
+fp_v2 = registry.register(read_schema("data/trade_avro_schema.json"))
 
 # Check compatibility
 back_ok, errors = registry.check_backward_compatibility(fp_v1, fp_v2)

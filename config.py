@@ -174,6 +174,11 @@ class Config:
     KAFKA_LAG_ALERT_THRESHOLD: int = int(os.getenv("KAFKA_LAG_ALERT_THRESHOLD", "500"))
     KAFKA_METRICS_PORT: int = int(os.getenv("KAFKA_METRICS_PORT", "9100"))
     TRADE_AVRO_SCHEMA_PATH: str = os.getenv("TRADE_AVRO_SCHEMA_PATH", "data/trade_avro_schema.json")
+    # Confluent-compatible Schema Registry base URL (ingestion/avro_codec.py).
+    # When unset, schemas are registered in an in-process registry instead.
+    SCHEMA_REGISTRY_URL: str | None = os.getenv("SCHEMA_REGISTRY_URL")
+    # NONE, BACKWARD, FORWARD or FULL; enforced when a producer registers its schema.
+    SCHEMA_COMPATIBILITY_MODE: str = os.getenv("SCHEMA_COMPATIBILITY_MODE", "BACKWARD")
 
     # Worker health monitoring (streaming/health.py::WorkerHealthMonitor). A
     # worker is marked UNHEALTHY when it has not heartbeat within this many
