@@ -41,6 +41,14 @@ rules:
         target: "#acme-wash-trade-alerts"
         severity_label: default
 
+  - name: ingestion-stream-quality
+    detectors: ["stream_quality_monitor"]
+    stop_on_match: true
+    destinations:
+      - channel: slack
+        target: "#data-quality"
+        severity_label: high
+
 # Used when no rule above matches at all.
 default_destinations:
   - channel: webhook

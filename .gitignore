@@ -126,6 +126,7 @@ notebooks/validation_report_*.json
 
 # Coverage reports
 .coverage
+temp_auto_push.bat
 .coverage.*
 htmlcov/
 coverage.xml
@@ -156,8 +157,6 @@ Desktop.ini
 *.swo
 *~
 .idea/
-.vscode/
-.vscode/settings.json
 *.code-workspace
 .project
 .classpath
@@ -257,3 +256,4 @@ alerts_dlq.ndjson
 
 # Grafana provisioning secrets
 monitoring/grafana/provisioning/datasources/*.yaml
+branch_structure.json

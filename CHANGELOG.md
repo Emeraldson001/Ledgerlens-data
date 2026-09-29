@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Stream-level ingestion anomaly detection (`ingestion/data_quality.py`, issue
+  #913): `StreamQualityMonitor` keeps rolling per-source baselines of batch
+  volume, key-field null rates and field means, and routes spikes and drops
+  through `alerts/router.py` with source, metric and magnitude context (new
+  `ingestion-stream-quality` rule in `alerts/routing_config.yaml`). Known,
+  expected changes can be acknowledged with suppression windows. Adds the
+  `ingestion_stream_quality.json` Grafana dashboard.
 - Single, authenticated, cryptographically-gated model promotion/rollback path
   (`detection/model_governance.py`, issue #671): `RiskScorer` now hard-blocks
   on any model that fails Ed25519 signature or transparency-log verification
