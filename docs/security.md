@@ -100,3 +100,12 @@ Each entry in `data/annotation_queue.json` carries an `annotation_hmac` field: H
 ```bash
 python -c "import secrets; print(secrets.token_hex(32))"
 ```
+
+## File scanning for historical uploads
+
+`ingestion/secure_file_handler.py` scans every file before parsing. The
+default `NoOpScanner` logs a warning that scanning is inactive. Enable the
+hash-based scanner with
+`set_scanner(HashListScanner())` (uses `data/denylist.json` /
+`data/allowlist.json`, lists of SHA-256 hex digests), or plug in ClamAV by
+implementing `FileScanner.scan(path) -> ScanResult`.
