@@ -3,13 +3,14 @@
 import time
 from collections.abc import Callable
 from functools import wraps
-from typing import TypeVar
+from typing import Concatenate, ParamSpec, TypeVar
 
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
 
 T = TypeVar("T")
+P = ParamSpec("P")
 
 
 def retry_with_backoff(
@@ -18,8 +19,11 @@ def retry_with_backoff(
     base_delay_seconds: float = 1.0,
     backoff_factor: float = 2.0,
     exceptions: tuple[type[BaseException], ...] = (Exception,),
-) -> Callable[[Callable[..., T]], Callable[..., T]]:
+) -> Callable[[Callable[Concatenate[P], T]], Callable[Concatenate[P], T]]:
     """Retry a callable with exponential backoff on the given exceptions.
+
+    Preserves the wrapped function's signature via ParamSpec, ensuring
+    IDE autocomplete and type checking work correctly for wrapped functions.
 
     Args:
         max_attempts: Total number of attempts (including the first) before
@@ -28,11 +32,14 @@ def retry_with_backoff(
             `backoff_factor`) on each subsequent attempt.
         backoff_factor: Multiplier applied to the delay after each retry.
         exceptions: Exception types that should trigger a retry.
+
+    Returns:
+        A decorator that wraps a callable and retries it with exponential backoff.
     """
 
-    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+    def decorator(func: Callable[Concatenate[P], T]) -> Callable[Concatenate[P], T]:
         @wraps(func)
-        def wrapper(*args, **kwargs) -> T:
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
             delay = base_delay_seconds
             for attempt in range(1, max_attempts + 1):
                 try:

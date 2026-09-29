@@ -104,3 +104,54 @@ def test_full_pipeline_submit_onchain(live_client, contract_id, submitter_secret
             time.sleep(_RETRY_DELAY)
 
     raise last_exc  # type: ignore[misc]
+
+
+def test_pipeline_submit_onchain_fails_immediately_without_secret():
+    """Verify --submit-onchain fails at startup with missing LEDGERLENS_SUBMITTER_SECRET.
+
+    This test confirms that the pipeline fails immediately during main() startup
+    (during validate_mode call), before any ingestion or scoring work is invoked.
+    It uses spies to ensure ingestion/scoring functions are never called.
+    """
+    env_overrides = {
+        "LEDGERLENS_CONTRACT_ID": "contract-id",
+        "LEDGERLENS_SUBMITTER_SECRET": "",  # Empty — missing the required secret
+        "SOROBAN_RPC_URL": "https://soroban-testnet.stellar.org",
+        "STELLAR_NETWORK": "TESTNET",
+        "WATCHED_ASSET_PAIRS": "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVV",
+        "RISK_SCORE_DB_URL": "sqlite:///test.db",
+        "MODEL_DIR": "./models",
+    }
+
+    with ExitStack() as stack:
+        for key, val in env_overrides.items():
+            stack.enter_context(patch.dict(os.environ, {key: val}))
+        stack.enter_context(
+            patch(
+                "sys.argv",
+                [
+                    "run_pipeline.py",
+                    "--submit-onchain",
+                ],
+            )
+        )
+        # Spy on ingestion function to verify it's never called
+        load_pair_spy = stack.enter_context(
+            patch.object(
+                run_pipeline,
+                "load_pair_to_dataframe",
+                side_effect=Exception("Should not be called"),
+            )
+        )
+        # Reload config so env overrides take effect
+        importlib.reload(cfg_module)
+        stack.enter_context(patch.object(run_pipeline, "config", cfg_module.Config()))
+
+        # Verify the pipeline fails at startup with the missing secret named
+        with pytest.raises(OSError) as exc:
+            run_pipeline.main()
+
+        error_msg = str(exc.value)
+        assert "LEDGERLENS_SUBMITTER_SECRET" in error_msg
+        # Verify ingestion was never started (validate_mode failed first)
+        load_pair_spy.assert_not_called()

@@ -1,0 +1,24 @@
+# Allowlist for analysis/dead_path_detector.py (Issue #547).
+#
+# A module ends up here when the static, import-statement-based scanner
+# cannot see how it's actually reached — e.g. it's loaded dynamically via
+# `importlib`, wired up as a plugin by string name, or invoked only through
+# a mechanism the scanner doesn't parse. Add an entry instead of ignoring a
+# scanner finding silently, so the reason is documented for the next reader.
+#
+# Schema (see docs/dead_path_detection.md "Ignorelist YAML schema"):
+#   ignored:                          # required top-level map of exclusions
+#     <dotted.module.path>: <reason>  # exact dotted module name -> required
+#                                     # free-text reason (why it is a false
+#                                     # positive). Globs/regex are NOT
+#                                     # supported; keys are matched exactly.
+# Comments (#) are allowed anywhere in the file.
+#
+# Format:
+#   ignored:
+#     dotted.module.path: "short reason this is a false positive"
+ignored:
+  monitoring.capacity_metrics: >-
+    Loaded only via importlib.import_module("monitoring.capacity_metrics")
+    in tests/test_capacity_metrics.py (to exercise Prometheus metric
+    registration on import), which the static import scanner cannot see.

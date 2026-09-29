@@ -1,0 +1,24 @@
+# Local development environment
+# DATABASE_URL: sqlite:///ledgerlens_local.db (SQLite for single-machine development)
+
+database:
+  # SQLite for local development; no auth required
+  url: "sqlite:///ledgerlens_local.db"
+  pool_size: 1
+  max_overflow: 0
+
+logging:
+  format: "text"
+  level: "DEBUG"  # Verbose logging for local development
+
+feature_drift:
+  window_size: 100  # Smaller for faster local testing
+
+# Local environment defaults to DEBUG mode and SQLite
+# No hardened authentication required
+# Local-development overlay. Applied on top of base.yaml when
+# LEDGERLENS_ENV=local (the default when no CI indicator is present).
+
+log_level: DEBUG
+log_format: text
+risk_score_db_url: sqlite:///ledgerlens_local.db

@@ -14,6 +14,13 @@ target-version = "py311"
 select = ["E", "F", "I", "UP", "B"]
 ignore = ["E501"]
 
+[tool.ruff.lint.per-file-ignores]
+# Tests intentionally import after dependency probes/path setup and assert broad
+# third-party failure contracts in a few compatibility cases.
+"tests/**" = ["B017", "B904", "E402"]
+"examples/**" = ["E402"]
+"*.ipynb" = ["E402"]
+
 [tool.black]
 line-length = 100
 target-version = ["py311", "py312"]
@@ -24,6 +31,24 @@ strict_optional = true
 warn_return_any = true
 ignore_missing_imports = true
 warn_unused_ignores = true
+# Modules covered by the static analysis gate (issue #545)
+# Run with: python scripts/static_analysis_gate.py
+# or:       mypy detection ingestion streaming ci_metrics benchmarks utils
+
+# ---------------------------------------------------------------------------
+# bandit — security linting (issue #545)
+# ---------------------------------------------------------------------------
+[tool.bandit]
+# Exclude test files and vendored scripts from the security scan
+exclude_dirs = ["tests", "scripts"]
+# Skip B101 (assert statements) — used in test helpers that may be imported
+skips = ["B101"]
+
+# ---------------------------------------------------------------------------
+# radon — complexity analysis (issue #545)
+# ---------------------------------------------------------------------------
+# Run via: python scripts/static_analysis_gate.py --complexity-max 10
+# Or:      radon cc detection/ ingestion/ --min C --show-complexity
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -31,4 +56,26 @@ addopts = "-ra"
 markers = [
     "integration: marks tests as live Testnet integration tests (deselect with '-m not integration')",
     "slow: marks tests that run PPO training (deselect with '-m not slow')",
+    "concurrency: concurrency validation tests for streaming workers (included by default)",
 ]
+
+# ---------------------------------------------------------------------------
+# mutmut — mutation testing configuration
+# ---------------------------------------------------------------------------
+# Run with: make mutation-test
+# Or manually: mutmut run --paths-to-mutate detection/benford_engine.py,...
+# ---------------------------------------------------------------------------
+[tool.mutmut]
+# Limit mutation scope to the core scoring path — keeps CI runtime under 15 min.
+# detection/model_inference.py is intentionally excluded here: it has heavy
+# integration fixtures (train_models, tmp_path_factory) that make mutmut's
+# subprocess-based runner very slow. The Makefile target passes it explicitly
+# via --paths-to-mutate instead so we can time-box it separately.
+paths_to_mutate = "detection/benford_engine.py"
+tests_dir = "tests/"
+# Run only the fast unit tests during mutation (skip integration + slow marks)
+runner = "python -m pytest -x -q --timeout=30 -m 'not integration and not slow' tests/test_benford.py tests/test_benford_ci.py"
+# Do not mutate import blocks, type annotations, or docstrings
+dict_synonyms = ""
+# Avoid mutating auto-generated files or vendored code
+exclude_list = "tests/,scripts/,data/"

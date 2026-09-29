@@ -1,0 +1,9 @@
+# CI overlay. Applied on top of base.yaml when LEDGERLENS_ENV=ci, or
+# automatically detected via CI / GITHUB_ACTIONS env vars (see
+# config.layering.detect_environment).
+
+log_level: WARNING
+log_format: json
+risk_score_db_url: sqlite:///:memory:
+db_pool_size: 2
+db_max_overflow: 0

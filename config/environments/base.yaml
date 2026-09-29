@@ -1,0 +1,62 @@
+# Base configuration applied to all environments
+# Environment-specific overlays in production.yaml / staging.yaml / local.yaml extend this
+
+database:
+  pool_size: 5
+  max_overflow: 10
+  pool_timeout: 30
+  # SQLite: timeout (seconds) before "database is locked" error
+  sqlite_timeout: 20
+  # Enable WAL mode for concurrent access (SQLite only)
+  sqlite_wal_mode: true
+
+logging:
+  # log_format must be "json" or "text"; non-local envs default to "json"
+  format: "text"
+  level: "INFO"
+
+feature_drift:
+  window_size: 1000
+
+alerts:
+  dedup_window_seconds: 60
+  min_dedup_window: 5
+  max_dedup_window: 300
+
+risk_scoring:
+  flag_threshold: 70
+  ml_threshold_pinned: 0  # 0 = RL agent enabled; non-zero pins threshold
+
+models:
+  # Directory for model artifacts; required for scoring
+  directory: "./models"
+  batch_scorer_workers: 10
+
+batch_processing:
+  min_trades_for_scoring: 20
+  list_reload_interval_seconds: 60
+
+blockchain:
+  stellar:
+    horizon_url: "https://horizon.stellar.org"
+    network: "PUBLIC"
+    soroban_rpc_url: "https://soroban-testnet.stellar.org"
+    # LEDGERLENS_CONTRACT_ID and LEDGERLENS_SUBMITTER_SECRET must be set via env
+  solana:
+    rpc_url: "https://api.mainnet-beta.solana.com"
+
+# Cross-pair synchrony window for detecting coordinated manipulation
+cross_pair_synchrony_window_seconds: 30
+# Shared configuration defaults layered under every environment-specific
+# overlay (local.yaml, ci.yaml, production.yaml). See config/layering.py.
+#
+# Precedence: hardcoded defaults < base.yaml (this file) < {environment}.yaml
+#             < LEDGERLENS_* env vars < explicit runtime overrides.
+
+log_level: INFO
+log_format: json
+risk_score_flag_threshold: 70
+benford_min_sample_size: 50
+alert_channel: stdout
+db_pool_size: 5
+db_max_overflow: 10

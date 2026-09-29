@@ -1,16 +1,22 @@
-"""Cryptographically committed audit trail for forensic reports."""
+"""Cryptographically committed audit trail for forensic reports.
+
+Security note: all content hashing uses SHA-256 exclusively (not MD5 or SHA-1),
+per the project security policy documented in docs/security.md.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from sqlalchemy import Column, DateTime, Integer, String, create_engine, event
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from config import config
 from detection.forensic_report import ForensicReport
@@ -216,3 +222,291 @@ def commit_forensic_report(
         features=features,
         timestamp=timestamp,
     )
+
+
+# ---------------------------------------------------------------------------
+# Merkle-chain tamper detection (Issue #196)
+# ---------------------------------------------------------------------------
+
+
+class TamperDetectedError(Exception):
+    """Raised when AuditMerkleChain.verify_chain detects a modified entry."""
+
+
+class AuditChainIncompleteError(Exception):
+    """Raised when verify_chain cannot recompute the requested range because
+    a prior entry's leaf content was never durably persisted.
+
+    This is distinct from :class:`TamperDetectedError` on purpose (Issue
+    #670, invariant 5): it means "this row predates migration 0005 / the
+    content-hash columns were never written for it", not "this row was
+    tampered with". Conflating the two would make a benign historical gap
+    look like an active security incident.
+    """
+
+
+class _MerkleBase(DeclarativeBase):
+    pass
+
+
+class _MerkleRootRecord(_MerkleBase):
+    """Separate append-only table storing Merkle roots independently.
+
+    ``content_hash``/``prev_merkle_root`` (migration 0005, Issue #670) persist
+    the leaf content itself, not just the root — without them, ``self._entries``
+    could only ever be rebuilt in-process, and a routine restart made
+    :meth:`AuditMerkleChain.verify_chain` indistinguishable from real
+    tampering. Both are nullable because rows written before migration 0005
+    never had this content captured; see ``AuditChainIncompleteError``.
+    """
+
+    __tablename__ = "audit_merkle_roots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    entry_index = Column(Integer, nullable=False, unique=True)
+    merkle_root = Column(String(64), nullable=False)
+    content_hash = Column(String(64), nullable=True)
+    prev_merkle_root = Column(String(64), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+
+def _sha256(data: str) -> str:
+    return hashlib.sha256(data.encode()).hexdigest()
+
+
+def _leaf_hash(index: int, content_hash: str) -> str:
+    return _sha256(f"{index}:{content_hash}")
+
+
+def _node_hash(left: str, right: str) -> str:
+    return _sha256(left + right)
+
+
+def _merkle_root(leaf_hashes: list[str]) -> str:
+    """Compute Merkle root from leaf hashes in O(n) time."""
+    if not leaf_hashes:
+        return _sha256("empty")
+    nodes = list(leaf_hashes)
+    while len(nodes) > 1:
+        if len(nodes) % 2 == 1:
+            nodes.append(nodes[-1])  # duplicate last leaf when odd
+        nodes = [_node_hash(nodes[i], nodes[i + 1]) for i in range(0, len(nodes), 2)]
+    return nodes[0]
+
+
+@dataclass
+class MerkleAuditEntry:
+    """A single entry in the Merkle audit chain.
+
+    ``content_hash``/``prev_merkle_root`` are ``None`` only for entries
+    rehydrated from a row written before migration 0005 — see
+    ``AuditChainIncompleteError``.
+    """
+
+    index: int
+    content_hash: str | None  # SHA-256 of entry content
+    prev_merkle_root: str | None  # root before this entry
+    merkle_root: str  # root after including this entry
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+
+class AuditMerkleChain:
+    """Merkle tree commitment scheme over audit log entries.
+
+    Each new entry extends a running Merkle root so any retrospective
+    modification to a log entry is detectable via :meth:`verify_chain`.
+
+    Merkle roots are stored in a separate ``audit_merkle_roots`` table,
+    making root tampering independently detectable from in-entry tampering.
+
+    Security: SHA-256 is used for all hashing (not MD5 or SHA-1).
+    """
+
+    def __init__(self, session_factory=None) -> None:
+        if session_factory is None:
+            engine = create_engine(config.RISK_SCORE_DB_URL)
+            _MerkleBase.metadata.create_all(engine, checkfirst=True)
+            if str(engine.url).startswith("sqlite"):
+
+                @event.listens_for(engine, "connect")
+                def _wal(conn, _rec):
+                    conn.execute("PRAGMA journal_mode=WAL")
+
+            self._session_factory = sessionmaker(bind=engine, future=True)
+        else:
+            self._session_factory = session_factory
+        self._entries: list[MerkleAuditEntry] = self._rehydrate_entries()
+
+    def _rehydrate_entries(self) -> list[MerkleAuditEntry]:
+        """Rebuild ``self._entries`` from durable storage on startup.
+
+        Issue #670: previously ``self._entries`` always started empty, so
+        every process restart made :meth:`verify_chain` raise
+        ``TamperDetectedError`` ("entry missing from in-memory chain") for
+        every entry written by a prior process — indistinguishable from real
+        tampering. Rehydrating from the persisted ``content_hash``/
+        ``prev_merkle_root`` columns (migration 0005) fixes that; rows
+        written before that migration have ``content_hash IS NULL`` and are
+        rehydrated with ``content_hash=None`` so index arithmetic in
+        :meth:`append` stays correct — :meth:`verify_chain` raises the
+        distinct ``AuditChainIncompleteError`` if asked to verify across one
+        of these legacy gaps, rather than misreporting it as tampering.
+        """
+        with self._session_factory() as session:
+            rows = session.query(_MerkleRootRecord).order_by(_MerkleRootRecord.entry_index).all()
+            return [
+                MerkleAuditEntry(
+                    index=r.entry_index,
+                    content_hash=r.content_hash,
+                    prev_merkle_root=r.prev_merkle_root,
+                    merkle_root=r.merkle_root,
+                    created_at=r.created_at.isoformat(),
+                )
+                for r in rows
+            ]
+
+    def _load_roots_from_db(self) -> dict[int, str]:
+        with self._session_factory() as session:
+            rows = session.query(_MerkleRootRecord).order_by(_MerkleRootRecord.entry_index).all()
+            return {r.entry_index: r.merkle_root for r in rows}
+
+    def _save_root(
+        self,
+        session: Session,
+        index: int,
+        root: str,
+        *,
+        content_hash: str | None = None,
+        prev_merkle_root: str | None = None,
+    ) -> None:
+        record = _MerkleRootRecord(
+            entry_index=index,
+            merkle_root=root,
+            content_hash=content_hash,
+            prev_merkle_root=prev_merkle_root,
+            created_at=datetime.now(UTC),
+        )
+        session.add(record)
+
+    def append(self, content: dict[str, Any]) -> MerkleAuditEntry:
+        """Append a new audit entry and extend the Merkle chain.
+
+        Parameters
+        ----------
+        content:
+            Arbitrary dict representing the audit event.  Its canonical
+            JSON SHA-256 hash becomes the leaf node in the chain.
+
+        Returns the constructed :class:`MerkleAuditEntry`.
+
+        Raises
+        ------
+        AuditChainIncompleteError
+            If any earlier entry's leaf content was never persisted (a
+            legacy row written before migration 0005). The Merkle root is a
+            function of every prior leaf hash — appending onto an unknown
+            history would produce a root that does not actually commit to
+            the true historical content, which is worse than refusing.
+        """
+        if any(e.content_hash is None for e in self._entries):
+            raise AuditChainIncompleteError(
+                "cannot append: this chain has one or more entries written before "
+                "migration 0005 whose leaf content was never persisted, so a new "
+                "entry cannot be correctly chained onto the historical Merkle root"
+            )
+
+        content_bytes = json.dumps(content, sort_keys=True, separators=(",", ":")).encode()
+        content_hash = hashlib.sha256(content_bytes).hexdigest()
+
+        index = len(self._entries)
+        prev_root = self._entries[-1].merkle_root if self._entries else _sha256("genesis")
+
+        leaf_hashes = [_leaf_hash(e.index, e.content_hash) for e in self._entries]
+        leaf_hashes.append(_leaf_hash(index, content_hash))
+        new_root = _merkle_root(leaf_hashes)
+
+        entry = MerkleAuditEntry(
+            index=index,
+            content_hash=content_hash,
+            prev_merkle_root=prev_root,
+            merkle_root=new_root,
+        )
+        self._entries.append(entry)
+
+        with self._session_factory() as session:
+            self._save_root(
+                session,
+                index,
+                new_root,
+                content_hash=content_hash,
+                prev_merkle_root=prev_root,
+            )
+            session.commit()
+
+        return entry
+
+    def verify_chain(self, start_index: int = 0, end_index: int | None = None) -> bool:
+        """Re-compute Merkle roots and confirm they match recorded roots.
+
+        Runs in O(n) where n = end_index - start_index. ``self._entries`` is
+        rehydrated from durable storage on every ``AuditMerkleChain()``
+        construction (Issue #670), so a routine process restart does not by
+        itself cause a spurious failure here — only a genuine gap in
+        durable storage (a deleted/missing row) or an actual content/root
+        mismatch does.
+
+        Raises
+        ------
+        TamperDetectedError
+            When any entry's re-computed root does not match the stored
+            root, or when durable storage is missing an entry index that
+            should exist (fewer persisted roots than the requested range).
+        AuditChainIncompleteError
+            When an entry in range predates migration 0005 and so has no
+            persisted leaf content to recompute from — this is a data-
+            availability gap, not evidence of tampering; see the class
+            attribute on the exception for details.
+        """
+        stop = end_index if end_index is not None else len(self._entries)
+        db_roots = self._load_roots_from_db()
+
+        leaf_hashes: list[str] = []
+        for i in range(stop):
+            if i < start_index:
+                # Still need to build up hashes before the window
+                if i >= len(self._entries):
+                    raise TamperDetectedError(f"Entry index {i} is missing from durable storage")
+                if self._entries[i].content_hash is None:
+                    raise AuditChainIncompleteError(
+                        f"entry index {i} predates migration 0005 (no persisted leaf "
+                        f"content) — cannot recompute the chain past this point"
+                    )
+                leaf_hashes.append(_leaf_hash(i, self._entries[i].content_hash))
+                continue
+            if i >= len(self._entries):
+                raise TamperDetectedError(f"Entry index {i} is missing from durable storage")
+            entry = self._entries[i]
+            if entry.content_hash is None:
+                raise AuditChainIncompleteError(
+                    f"entry index {i} predates migration 0005 (no persisted leaf "
+                    f"content) — cannot recompute the chain past this point"
+                )
+            leaf_hashes.append(_leaf_hash(i, entry.content_hash))
+            recomputed = _merkle_root(leaf_hashes[:])
+
+            if recomputed != entry.merkle_root:
+                raise TamperDetectedError(
+                    f"In-entry Merkle root mismatch at index {i}: "
+                    f"expected {entry.merkle_root!r}, got {recomputed!r}"
+                )
+
+            stored_root = db_roots.get(i)
+            if stored_root is None:
+                raise TamperDetectedError(f"No Merkle root found in separate table for index {i}")
+            if stored_root != recomputed:
+                raise TamperDetectedError(
+                    f"Separate-table Merkle root mismatch at index {i}: "
+                    f"db={stored_root!r}, computed={recomputed!r}"
+                )
+
+        return True

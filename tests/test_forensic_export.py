@@ -13,19 +13,11 @@ Covers (per acceptance criteria #97):
 from __future__ import annotations
 
 import csv
-import io
 import json
 import os
 import stat
-import sys
-from unittest.mock import MagicMock
 
 import pytest
-
-sys.modules["detection.causal_attribution"] = MagicMock()
-sys.modules["detection.model_inference"] = MagicMock()
-sys.modules["detection.shap_explainer"] = MagicMock()
-sys.modules["detection.risk_propagation"] = MagicMock()
 
 from detection.forensic_report import (
     CSV_COLUMNS,
@@ -43,22 +35,37 @@ from detection.forensic_report import (
 
 WALLET = "GABC1234567890123456789012345678901234567890123456789012"
 PAIR = "USDC:GA5Z/XLM:native"
-RISK_SCORE = {"score": 83, "benford_flag": True, "ml_flag": True, "confidence": 76}
+RISK_SCORE = 83
 SHAP = [
     {"feature": "benford_mad_24h", "contribution": 0.34, "value": 0.047},
     {"feature": "counterparty_concentration_ratio", "contribution": 0.29, "value": 0.98},
 ]
 
 
-@pytest.fixture()
-def basic_report() -> ForensicReport:
-    """A ForensicReport with SHAP values but no causal/propagation sections."""
-    return ForensicReport(
+def _base_kwargs(**overrides) -> dict:
+    """Required fields for a minimal ForensicReport, with overridable defaults."""
+    kwargs = dict(
+        report_id="test-report-id",
+        generated_at="2026-06-22T12:00:00Z",
         wallet=WALLET,
         asset_pair=PAIR,
         risk_score=RISK_SCORE,
-        shap_explanations=SHAP,
+        score_lower=73,
+        score_upper=93,
+        verdict="wash_trade",
+        top_shap_features=SHAP,
+        benford_analysis={},
+        trade_evidence=[],
+        model_metadata={"name": "test", "version": "v1"},
     )
+    kwargs.update(overrides)
+    return kwargs
+
+
+@pytest.fixture()
+def basic_report() -> ForensicReport:
+    """A ForensicReport with SHAP values but no causal/propagation sections."""
+    return ForensicReport(**_base_kwargs())
 
 
 @pytest.fixture()
@@ -76,24 +83,13 @@ def report_with_propagation() -> ForensicReport:
             ),
         ],
     )
-    return ForensicReport(
-        wallet=WALLET,
-        asset_pair=PAIR,
-        risk_score=RISK_SCORE,
-        shap_explanations=SHAP,
-        propagation_path=pp,
-    )
+    return ForensicReport(**_base_kwargs(propagation_path=pp))
 
 
 @pytest.fixture()
 def report_no_shap() -> ForensicReport:
-    """A ForensicReport with an empty shap_explanations list."""
-    return ForensicReport(
-        wallet=WALLET,
-        asset_pair=PAIR,
-        risk_score=RISK_SCORE,
-        shap_explanations=[],
-    )
+    """A ForensicReport with an empty top_shap_features list."""
+    return ForensicReport(**_base_kwargs(top_shap_features=[]))
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +109,7 @@ class TestToDict:
 
     def test_top_level_keys(self, basic_report):
         d = basic_report.to_dict()
-        required = {"wallet", "asset_pair", "risk_score", "shap_explanations"}
+        required = {"wallet", "asset_pair", "risk_score", "top_shap_features"}
         assert required.issubset(d.keys())
 
     def test_wallet_and_pair(self, basic_report):
@@ -121,23 +117,23 @@ class TestToDict:
         assert d["wallet"] == WALLET
         assert d["asset_pair"] == PAIR
 
-    def test_risk_score_is_dict(self, basic_report):
+    def test_risk_score_is_int(self, basic_report):
         d = basic_report.to_dict()
-        assert isinstance(d["risk_score"], dict)
-        assert d["risk_score"]["score"] == RISK_SCORE["score"]
+        assert isinstance(d["risk_score"], int)
+        assert d["risk_score"] == RISK_SCORE
 
     def test_shap_explanations_preserved(self, basic_report):
         d = basic_report.to_dict()
-        assert len(d["shap_explanations"]) == len(SHAP)
-        assert d["shap_explanations"][0]["feature"] == SHAP[0]["feature"]
+        assert len(d["top_shap_features"]) == len(SHAP)
+        assert d["top_shap_features"][0]["feature"] == SHAP[0]["feature"]
 
-    def test_causal_attribution_none_when_absent(self, basic_report):
+    def test_causal_attribution_absent_when_not_set(self, basic_report):
         d = basic_report.to_dict()
-        assert d["causal_attribution"] is None
+        assert "causal_attribution" not in d
 
-    def test_propagation_path_none_when_absent(self, basic_report):
+    def test_propagation_path_absent_when_not_set(self, basic_report):
         d = basic_report.to_dict()
-        assert d["propagation_path"] is None
+        assert "propagation_path" not in d
 
     def test_propagation_path_included_when_present(self, report_with_propagation):
         """Acceptance criterion: propagation_path section included in JSON export."""
@@ -166,13 +162,7 @@ class TestToDict:
             causal_chain=[{"hop": 1, "wallet": WALLET, "role": "initiator"}],
             interventional_score_if_no_wash=25,
         )
-        report = ForensicReport(
-            wallet=WALLET,
-            asset_pair=PAIR,
-            risk_score=RISK_SCORE,
-            shap_explanations=SHAP,
-            causal_attribution=ca,
-        )
+        report = ForensicReport(**_base_kwargs(causal_attribution=ca))
         d = report.to_dict()
         assert d["causal_attribution"] is not None
         assert d["causal_attribution"]["counterfactual_score"] == 40
@@ -205,7 +195,7 @@ class TestToCsvRows:
 
     def test_risk_score_value_is_numeric_score(self, basic_report):
         for row in basic_report.to_csv_rows():
-            assert row["risk_score"] == RISK_SCORE["score"]
+            assert row["risk_score"] == RISK_SCORE
 
     def test_feature_name_correct(self, basic_report):
         rows = basic_report.to_csv_rows()
@@ -218,7 +208,7 @@ class TestToCsvRows:
         assert rows[0]["shap_contribution"] == pytest.approx(SHAP[0]["contribution"])
 
     def test_no_shap_emits_single_placeholder_row(self, report_no_shap):
-        """When shap_explanations is empty one placeholder row must be emitted."""
+        """When top_shap_features is empty one placeholder row must be emitted."""
         rows = report_no_shap.to_csv_rows()
         assert len(rows) == 1
         row = rows[0]

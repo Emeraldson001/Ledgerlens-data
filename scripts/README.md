@@ -1,5 +1,22 @@
 # scripts/
 
+## `sandbox.py` — Sandboxed execution checks
+
+`sandboxed_execution()` wraps a maintenance script's entrypoint with CPU/memory
+resource limits and optional network blocking, raising `SandboxViolation` with
+an actionable message instead of letting the process die opaquely.
+`dry_run_guard()` centralizes `--dry-run` logging for destructive actions
+(see `migrate_add_ring_id.py` for a reference integration).
+
+```python
+from scripts.sandbox import sandboxed_execution, dry_run_guard
+
+with sandboxed_execution(allow_network=False):
+    dry_run_guard(args.dry_run, "ALTER TABLE ...", lambda: migrate(engine))
+```
+
+---
+
 ## `stream.py` — Real-time streaming pipeline
 
 Streams trades from the Stellar Horizon SSE API, maintains a rolling feature
@@ -219,3 +236,62 @@ python -m scripts.run_adversarial_eval \
 | `--skip-augmentation` | off | Skip the slower adversarial-augmentation retraining comparison |
 
 Requires trained models (run `model_training.py` first).
+
+---
+
+## `trace_feature.py`
+
+Trace which Horizon trade IDs contributed to a specific wallet feature score.
+This is useful when debugging a suspicious score or verifying that the feature
+value came from the expected trade window.
+
+### Usage
+
+```bash
+# Seed a synthetic risk-score record in a local SQLite database.
+RISK_SCORE_DB_URL=sqlite:////tmp/ledgerlens-risk.db \
+python - <<'PY'
+from detection.persistence import Base, RiskScoreRecord, get_engine
+from sqlalchemy.orm import Session
+
+engine = get_engine()
+Base.metadata.create_all(engine)
+with Session(engine) as session:
+    session.add(
+        RiskScoreRecord(
+            wallet="GCRN5Q6QK6SP3U2PB5UD2JJJ5K3T2EC2KSN3FV7RO4DVK2G4MYA6V3E",
+            asset_pair="XLM/native",
+            score=82,
+            benford_flag=True,
+            ml_flag=False,
+            confidence=79,
+            provenance_json='{"benford_chi_square_24h": ["trade_001", "trade_002", "trade_003"]}',
+        )
+    )
+    session.commit()
+PY
+
+# Trace one feature for that wallet.
+RISK_SCORE_DB_URL=sqlite:////tmp/ledgerlens-risk.db \
+python -m scripts.trace_feature \
+    --wallet GCRN5Q6QK6SP3U2PB5UD2JJJ5K3T2EC2KSN3FV7RO4DVK2G4MYA6V3E \
+    --feature benford_chi_square_24h \
+    --asset-pair XLM/native
+```
+
+### Example output
+
+```text
+Feature:    benford_chi_square_24h
+Wallet:     GCRN5Q6QK6SP3U2PB5UD2JJJ5K3T2EC2KSN3FV7RO4DVK2G4MYA6V3E
+Asset pair: XLM/native
+Trade IDs (3):
+  trade_001  https://horizon.stellar.org/trades/trade_001
+  trade_002  https://horizon.stellar.org/trades/trade_002
+  trade_003  https://horizon.stellar.org/trades/trade_003
+```
+
+The output prints the feature name, wallet, asset pair, and each trade ID that
+contributed to the score, plus a Horizon explorer link for each trade. If the
+wallet is missing, the provenance JSON is empty, or the requested feature is not
+tracked, the command exits non-zero with an explanatory message.

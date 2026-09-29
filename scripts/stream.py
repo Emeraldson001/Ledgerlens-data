@@ -22,7 +22,9 @@ import os
 import sys
 
 from config import config
+from config.contracts import validate_mode
 from streaming.alert_dispatcher import AlertDispatcher
+from streaming.alert_ledger import AlertDeliveryLedger
 from streaming.feature_buffer import FeatureBuffer
 from streaming.pipeline import StreamingPipeline
 from streaming.streaming_scorer import StreamingScorer
@@ -72,6 +74,16 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["all", "producer", "worker"],
         help="Kafka role: 'producer' (SSE→Kafka), 'worker' (scorer), or 'all'",
     )
+    parser.add_argument(
+        "--fixed-batch-size",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Disable adaptive micro-batch sizing and use a fixed batch of N. "
+            "Useful for debugging PID oscillation (Issue #243)."
+        ),
+    )
     return parser
 
 
@@ -82,9 +94,11 @@ def main() -> None:
     config.STREAMING_BACKEND = args.backend
 
     # --- Config validation ---
-    # A producer needs pairs to stream; a worker discovers topics dynamically.
-    if args.role != "worker" and not config.WATCHED_ASSET_PAIRS:
-        logger.error("WATCHED_ASSET_PAIRS is not configured — set it in .env before streaming")
+    mode = "streaming_kafka" if args.backend == "kafka" else "streaming_sse"
+    try:
+        validate_mode(mode, alert_channel=args.alert_channel, role=args.role, backend=args.backend)
+    except OSError as exc:
+        logger.error(str(exc))
         sys.exit(1)
 
     # --- Load ensemble models (not needed for a pure Kafka producer) ---
@@ -92,6 +106,11 @@ def main() -> None:
     if not (args.backend == "kafka" and args.role == "producer"):
         scorer = StreamingScorer()
         scorer.min_trades = args.min_trades
+        if args.fixed_batch_size is not None:
+            logger.info(
+                "Adaptive batch sizing disabled; fixed batch size = %d", args.fixed_batch_size
+            )
+            scorer._fixed_batch_size = args.fixed_batch_size
 
         if not scorer._risk_scorer.models:
             logger.error(
@@ -109,7 +128,11 @@ def main() -> None:
 
         host = os.getenv("WS_BIND_HOST", "127.0.0.1")
         port = int(os.getenv("WS_PORT", "8765"))
-        start_ws_server_thread(host, port)
+        try:
+            start_ws_server_thread(host, port)
+        except OSError as exc:
+            logger.error(str(exc))
+            sys.exit(1)
         ws_client = _WsClientAdapter()
         ws_addr = f"ws://{host}:{port}"
 
@@ -120,6 +143,7 @@ def main() -> None:
         webhook_url=os.getenv("ALERT_WEBHOOK_URL"),
         ws_client=ws_client,
         alert_cooldown_seconds=args.cooldown_seconds,
+        delivery_ledger=AlertDeliveryLedger(),
     )
     pipeline = StreamingPipeline(buffer, scorer, dispatcher, role=args.role)
 
@@ -136,6 +160,12 @@ def main() -> None:
     )
     if ws_addr:
         logger.info("WebSocket server: %s", ws_addr)
+
+    # --- Start health check server ---
+    from streaming.health_check import start_health_server
+
+    health_port = int(os.getenv("HEALTH_SERVER_PORT", "8080"))
+    start_health_server(port=health_port)
 
     pipeline.run()
 

@@ -4,18 +4,24 @@ from collections.abc import Iterable, Iterator
 from datetime import datetime
 
 import pandas as pd
+from pydantic import ValidationError
 from stellar_sdk import Asset as SdkAsset
 from stellar_sdk import Server
 
 from config import config
 from ingestion.data_models import Trade
+from ingestion.horizon_fetcher import fetch as horizon_fetch
 from ingestion.horizon_streamer import _to_trade
+from ingestion.untrusted_input import UntrustedInputError, validate_trade
+from utils.logging import get_logger
 from utils.retry import retry_with_backoff
+
+logger = get_logger(__name__)
 
 
 @retry_with_backoff(exceptions=(ConnectionError, TimeoutError, OSError))
 def _fetch_page(call_builder):
-    return call_builder.call()
+    return horizon_fetch(call_builder.call)
 
 
 def load_trades(
@@ -45,7 +51,16 @@ def load_trades(
             break
 
         for record in records:
-            trade = _to_trade(record)
+            try:
+                trade = _to_trade(record)
+                validate_trade(trade, source="historical_loader")
+            except (UntrustedInputError, ValidationError, KeyError, ValueError) as exc:
+                logger.warning(
+                    "Rejected malformed trade record from Horizon (id=%s): %s",
+                    record.get("id", "?"),
+                    exc,
+                )
+                continue
             if start_time and trade.ledger_close_time < start_time:
                 continue
             yield trade

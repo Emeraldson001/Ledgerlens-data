@@ -140,6 +140,51 @@ def test_ring_internal_density():
     assert stats["internal_edge_density"] == 1.0
 
 
+def test_ring_statistics_has_all_required_fields():
+    """Verify ring_statistics returns all documented fields with correct types."""
+    members = ["R0", "R1", "R2"]
+    graph = _complete_funding_graph(members)
+
+    community_map = {node: 0 for node in members}
+    stats = ring_statistics(0, community_map, graph)
+
+    # Verify all documented fields are present
+    assert "ring_id" in stats
+    assert "ring_size" in stats
+    assert "internal_edge_density" in stats
+    assert "avg_funding_depth" in stats
+
+    # Verify types match RingStatistics TypedDict
+    assert isinstance(stats["ring_id"], str)
+    assert isinstance(stats["ring_size"], int)
+    assert isinstance(stats["internal_edge_density"], float)
+    assert isinstance(stats["avg_funding_depth"], float)
+
+    # Verify specific values
+    assert stats["ring_size"] == 3
+    assert stats["internal_edge_density"] == 1.0
+
+
+def test_build_ring_statistics_returns_typed_dict():
+    """Verify build_ring_statistics returns properly typed results."""
+    members = ["X0", "X1", "X2"]
+    graph = _complete_funding_graph(members)
+
+    community_map = detect_wash_trading_rings(graph, min_ring_size=2)
+    ring_stats = build_ring_statistics(community_map, graph)
+
+    # Verify result is a dict mapping int to RingStatistics
+    assert isinstance(ring_stats, dict)
+    for community_id, stats in ring_stats.items():
+        assert isinstance(community_id, int)
+        assert isinstance(stats, dict)
+        # Each stats should have all required RingStatistics fields
+        assert all(
+            key in stats
+            for key in ["ring_id", "ring_size", "internal_edge_density", "avg_funding_depth"]
+        )
+
+
 # ---------------------------------------------------------------------------
 # Performance
 # ---------------------------------------------------------------------------

@@ -19,6 +19,10 @@ from datetime import UTC, datetime
 import numpy as np
 import pandas as pd
 
+from utils.logging import get_logger
+
+logger = get_logger(__name__)
+
 PSI_MODERATE_DRIFT_THRESHOLD = 0.25
 PSI_EPSILON = 1e-4
 
@@ -73,6 +77,12 @@ class DriftMonitor:
 
         for col in current_data.columns:
             if col not in self.reference:
+                logger.warning(
+                    "Skipping drift computation for feature %r: no reference "
+                    "distribution in model metadata (feature may be new since "
+                    "the last training run)",
+                    col,
+                )
                 continue
 
             ref = self.reference[col]
@@ -95,8 +105,11 @@ class DriftMonitor:
             drift_flag = psi >= PSI_MODERATE_DRIFT_THRESHOLD
             if drift_flag:
                 any_drift = True
+                # Only include features that breached the threshold
+                features.append({"feature": col, "psi": float(psi), "drift_flag": drift_flag})
 
-            features.append({"feature": col, "psi": psi, "drift_flag": drift_flag})
+        # Sort by PSI descending (worst-drifted features first)
+        features.sort(key=lambda f: f["psi"], reverse=True)
 
         report = DriftReport(features=features, any_drift_detected=any_drift)
         self._write_report(report)
@@ -132,18 +145,13 @@ class LiveDriftMonitor:
         try:
             from config import config  # type: ignore
 
-            self.threshold = (
-                config.DRIFT_PSI_THRESHOLD if threshold is None else float(threshold)
-            )
-            self.window_size = (
-                config.DRIFT_WINDOW_SIZE if window_size is None else int(window_size)
-            )
+            self.threshold = config.DRIFT_PSI_THRESHOLD if threshold is None else float(threshold)
+            self.window_size = config.DRIFT_WINDOW_SIZE if window_size is None else int(window_size)
         except Exception:  # pragma: no cover
             self.threshold = 0.2 if threshold is None else float(threshold)
             self.window_size = 1000 if window_size is None else int(window_size)
 
-
-        with open(reference_path, "r", encoding="utf-8") as f:
+        with open(reference_path, encoding="utf-8") as f:
             raw = json.load(f)
 
         # Support either the raw dict or wrapper under "feature_distributions".
@@ -202,4 +210,3 @@ class LiveDriftMonitor:
                 drifted.append(feature)
 
         return drifted
-

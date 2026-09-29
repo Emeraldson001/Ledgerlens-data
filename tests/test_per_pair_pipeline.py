@@ -20,6 +20,8 @@ def test_load_pair_to_dataframe_filters_correctly(mock_fetch):
     from stellar_sdk import Asset as SdkAsset
 
     usdc_issuer = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+    base_account = "GCGPQMCLRXCUPCL3AVMYUUQML2WVC7A5M6HO5RKYSU4CIA7O7SI4VKWE"
+    counter_account = "GB2HHLFDCBSBDAMU2QRDU4AJV63WQE2DWT7MBZWZRQDFYUXJXIPPUG7M"
     xlm = SdkAsset.native()
     usdc = SdkAsset("USDC", usdc_issuer)
 
@@ -27,8 +29,8 @@ def test_load_pair_to_dataframe_filters_correctly(mock_fetch):
         "id": "t1",
         "paging_token": "1",
         "ledger_close_time": "2024-01-01T00:00:00Z",
-        "base_account": "GA",
-        "counter_account": "GB",
+        "base_account": base_account,
+        "counter_account": counter_account,
         "base_asset_type": "credit_alphanum4",
         "base_asset_code": "USDC",
         "base_asset_issuer": usdc_issuer,
@@ -47,8 +49,8 @@ def test_load_pair_to_dataframe_filters_correctly(mock_fetch):
 
     assert not result.empty
     assert len(result) == 1
-    assert result.iloc[0]["base_account"] == "GA"
-    assert result.iloc[0]["counter_account"] == "GB"
+    assert result.iloc[0]["base_account"] == base_account
+    assert result.iloc[0]["counter_account"] == counter_account
 
 
 # ---------------------------------------------------------------------------
@@ -122,9 +124,11 @@ def test_pipeline_upserts_one_record_per_wallet_per_pair():
         return pair_a_trades if call_count[0] == 1 else pair_b_trades
 
     upserted: list[tuple[str, str]] = []
+    finalities: list[str] = []
 
-    def fake_upsert(wallet, asset_pair, risk_score):
+    def fake_upsert(wallet, asset_pair, risk_score, *, finality="provisional"):
         upserted.append((wallet, asset_pair))
+        finalities.append(finality)
 
     feat_a = pd.DataFrame({"wallet": ["GA", "GB"], "benford_mad_1h": [0.0, 0.0]})
     feat_b = pd.DataFrame({"wallet": ["GC", "GD"], "benford_mad_1h": [0.0, 0.0]})
@@ -176,6 +180,58 @@ def test_pipeline_upserts_one_record_per_wallet_per_pair():
     assert len(upserted) == 4
     pair_ids = {ap for _, ap in upserted}
     assert len(pair_ids) == 2  # two distinct pair_ids
+    # A completed batch pipeline run over a bounded window writes final scores
+    # (Issue #670) — the continuous streaming path is the only one that
+    # writes provisional.
+    assert finalities == ["final"] * 4
+
+
+def test_run_pipeline_uses_idempotent_upsert_and_checkpointing():
+    """The full pipeline should persist scores through idempotent writes."""
+    ts = pd.Timestamp("2024-01-01", tz="UTC")
+    trades = pd.DataFrame(
+        {
+            "base_account": ["GA"],
+            "counter_account": ["GB"],
+            "ledger_close_time": [ts],
+            "amount": [100.0],
+        }
+    )
+    feature_matrix = pd.DataFrame({"wallet": ["GA", "GB"], "benford_mad_1h": [0.0, 0.0]})
+    scored = pd.DataFrame(
+        {
+            "wallet": ["GA", "GB"],
+            "score": [85, 10],
+            "benford_flag": [True, False],
+            "ml_flag": [True, False],
+            "confidence": [90, 30],
+        }
+    )
+
+    fake_scorer = MagicMock()
+    fake_scorer.score_matrix.return_value = scored
+
+    fake_score_store = MagicMock()
+    fake_score_store.get.return_value = None
+    fake_score_store.upsert.return_value = None
+
+    usdc_issuer = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+
+    with (
+        patch("sys.argv", ["run_pipeline.py", "--no-orderbook", "--no-graph"]),
+        patch.object(run_pipeline.config, "WATCHED_ASSET_PAIRS", [("USDC", usdc_issuer)]),
+        patch.object(run_pipeline, "load_pair_to_dataframe", return_value=trades),
+        patch.object(run_pipeline, "build_feature_matrix", return_value=feature_matrix),
+        patch("detection.model_inference.RiskScorer", return_value=fake_scorer),
+        patch.object(run_pipeline, "RiskScoreStore", return_value=fake_score_store),
+        patch("pipeline.idempotency._IDEMPOTENCY_DB_URL", "sqlite:///:memory:"),
+    ):
+        with patch.object(
+            run_pipeline, "idempotent_upsert", return_value=(True, None)
+        ) as mock_upsert:
+            run_pipeline.main()
+
+    assert mock_upsert.call_count == 2
 
 
 # ---------------------------------------------------------------------------

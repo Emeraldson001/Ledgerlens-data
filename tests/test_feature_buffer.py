@@ -147,3 +147,72 @@ def test_concurrent_writes_no_corruption():
     assert not errors, f"Exceptions raised in writer threads: {errors}"
     # Buffer is capped; count must be ≤ max_trades
     assert buf.wallet_trade_count(WALLET_A) <= max_trades
+
+
+# ---------------------------------------------------------------------------
+# 6. Redelivery of the same trade_id is idempotent (Issue #670, invariant 1)
+# ---------------------------------------------------------------------------
+
+
+def test_redelivered_trade_id_does_not_double_count():
+    """A trade_id already applied to a wallet must be a no-op on replay/redelivery."""
+    buf = FeatureBuffer()
+    trade = _make_trade(trade_id="dup-1")
+
+    buf.update(trade)
+    buf.update(trade)  # redelivery of the identical message
+    buf.update(trade)  # a second, later redelivery
+
+    assert buf.wallet_trade_count(WALLET_A) == 1
+    assert buf.wallet_trade_count(WALLET_B) == 1
+
+
+def test_redelivered_trade_id_does_not_double_count_benford_sketch():
+    """Duplicate application must not skew Benford digit counts either."""
+    buf = FeatureBuffer()
+    trade = _make_trade(trade_id="dup-2", base_amount=123.0)
+
+    buf.update(trade)
+    metrics_once = buf._benford_sketches[WALLET_A][
+        next(iter(buf._benford_sketches[WALLET_A]))
+    ].to_metrics()
+
+    buf.update(trade)
+    buf.update(trade)
+    metrics_after_replay = buf._benford_sketches[WALLET_A][
+        next(iter(buf._benford_sketches[WALLET_A]))
+    ].to_metrics()
+
+    assert metrics_once.sample_size == metrics_after_replay.sample_size
+
+
+def test_different_trade_ids_still_both_recorded():
+    buf = FeatureBuffer()
+    buf.update(_make_trade(trade_id="a"))
+    buf.update(_make_trade(trade_id="b"))
+    assert buf.wallet_trade_count(WALLET_A) == 2
+
+
+def test_seen_trade_id_index_evicted_in_lockstep_with_deque():
+    """Once a trade falls out of the capped deque, its trade_id becomes
+    reusable — replaying an old trade_id after it has scrolled out of the
+    window must be recorded again (it's outside the current retention
+    window, not a live duplicate)."""
+    max_trades = 3
+    buf = FeatureBuffer(max_trades=max_trades)
+
+    for i in range(max_trades):
+        buf.update(_make_trade(base_amount=float(i), trade_id=f"t{i}"))
+    assert buf.wallet_trade_count(WALLET_A) == max_trades
+
+    # Push t0 out of the window.
+    buf.update(_make_trade(base_amount=99.0, trade_id="t-new"))
+    assert buf.wallet_trade_count(WALLET_A) == max_trades
+    with buf._wallet_locks[WALLET_A]:
+        assert "t0" not in buf._seen_trade_ids[WALLET_A]
+
+    # t0 is no longer tracked as "seen" — replaying it re-adds it (evicting t1).
+    buf.update(_make_trade(base_amount=0.0, trade_id="t0"))
+    with buf._wallet_locks[WALLET_A]:
+        amounts = [r["amount"] for r in buf._buffers[WALLET_A]]
+    assert 0.0 in amounts

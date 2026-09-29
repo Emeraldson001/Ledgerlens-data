@@ -62,25 +62,29 @@ class BehavioralMatcher:
         s_records = []
         for tx in stellar_txs:
             try:
-                s_records.append({
-                    "wallet": tx["wallet"],
-                    "timestamp": to_timestamp(tx["timestamp"]),
-                    "amount": float(tx["amount"]),
-                    "id": tx.get("id", tx.get("tx_id", ""))
-                })
+                s_records.append(
+                    {
+                        "wallet": tx["wallet"],
+                        "timestamp": to_timestamp(tx["timestamp"]),
+                        "amount": float(tx["amount"]),
+                        "id": tx.get("id", tx.get("tx_id", "")),
+                    }
+                )
             except Exception as e:
                 logger.warning("Skipping invalid Stellar record: %s. Error: %s", tx, e)
 
         ext_records = []
         for tx in external_txs:
             try:
-                ext_records.append({
-                    "wallet": tx["wallet"],
-                    "timestamp": to_timestamp(tx["timestamp"]),
-                    "amount": float(tx["amount"]),
-                    "chain": tx.get("chain", "ethereum").lower(),
-                    "id": tx.get("id", tx.get("tx_id", ""))
-                })
+                ext_records.append(
+                    {
+                        "wallet": tx["wallet"],
+                        "timestamp": to_timestamp(tx["timestamp"]),
+                        "amount": float(tx["amount"]),
+                        "chain": tx.get("chain", "ethereum").lower(),
+                        "id": tx.get("id", tx.get("tx_id", "")),
+                    }
+                )
             except Exception as e:
                 logger.warning("Skipping invalid external record: %s. Error: %s", tx, e)
 
@@ -104,21 +108,23 @@ class BehavioralMatcher:
                 if (diff / s_amt) <= tolerance:
                     # Match found! Calculate confidence
                     confidence = 1.0 - (diff / s_amt) if diff > 0 else 1.0
-                    links.append({
-                        "stellar_address": s_tx["wallet"],
-                        "linked_address": ext_tx["wallet"],
-                        "chain": ext_tx["chain"],
-                        "confidence": float(confidence),
-                        "metadata": {
-                            "stellar_tx_id": s_tx["id"],
-                            "external_tx_id": ext_tx["id"],
-                            "stellar_amount": s_amt,
-                            "external_amount": ext_amt,
-                            "stellar_timestamp": s_time,
-                            "external_timestamp": ext_time,
-                            "type": "amount_fingerprint"
+                    links.append(
+                        {
+                            "stellar_address": s_tx["wallet"],
+                            "linked_address": ext_tx["wallet"],
+                            "chain": ext_tx["chain"],
+                            "confidence": float(confidence),
+                            "metadata": {
+                                "stellar_tx_id": s_tx["id"],
+                                "external_tx_id": ext_tx["id"],
+                                "stellar_amount": s_amt,
+                                "external_amount": ext_amt,
+                                "stellar_timestamp": s_time,
+                                "external_timestamp": ext_time,
+                                "type": "amount_fingerprint",
+                            },
                         }
-                    })
+                    )
 
         return links
 
@@ -211,17 +217,19 @@ class BehavioralMatcher:
                     continue
 
                 if r >= threshold:
-                    links.append({
-                        "stellar_address": s_w,
-                        "linked_address": ext_w,
-                        "chain": chain,
-                        "confidence": float(r),
-                        "metadata": {
-                            "pearson_r": float(r),
-                            "n_bins": int(n_bins),
-                            "bin_size_seconds": float(bin_size_seconds),
-                            "type": "timing_correlation"
+                    links.append(
+                        {
+                            "stellar_address": s_w,
+                            "linked_address": ext_w,
+                            "chain": chain,
+                            "confidence": float(r),
+                            "metadata": {
+                                "pearson_r": float(r),
+                                "n_bins": int(n_bins),
+                                "bin_size_seconds": float(bin_size_seconds),
+                                "type": "timing_correlation",
+                            },
                         }
-                    })
+                    )
 
         return links

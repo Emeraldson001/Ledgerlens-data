@@ -1,0 +1,48 @@
+# Production environment configuration
+# REQUIRED: DATABASE_URL must be set to a PostgreSQL connection string
+# REQUIRED: All secrets must be provided via environment variables
+# FAIL CLOSED: Missing this file in production mode causes startup failure
+
+database:
+  # PRODUCTION: Must be PostgreSQL with TLS and credentials from environment
+  # Example: postgresql://user:pass@prod-rds.us-east-1.rds.amazonaws.com:5432/ledgerlens
+  # Set via DATABASE_URL environment variable; empty here as it comes from secrets
+  url: "${DATABASE_URL}"
+  pool_size: 20
+  max_overflow: 30
+  pool_timeout: 30
+  require_tls: true
+
+logging:
+  format: "json"  # Structured logging for log aggregation
+  level: "WARNING"  # Production: only warn/error; info/debug suppressed
+
+feature_drift:
+  window_size: 1000
+
+alerts:
+  dedup_window_seconds: 60
+
+risk_scoring:
+  flag_threshold: 70
+
+models:
+  directory: "/var/lib/ledgerlens/models"  # Persistent volume in prod
+  batch_scorer_workers: 20  # Higher for prod load
+
+# Security hardening
+security:
+  enable_query_audit: true
+  enable_backup_verification: true
+  require_backup_before_migration: true
+
+# Monitoring and observability
+observability:
+  metrics_enabled: true
+  trace_sampling_rate: 0.1
+  health_check_interval_seconds: 30
+
+# Incident response
+incident_response:
+  enable_emergency_halt: true
+  emergency_halt_key: "${EMERGENCY_HALT_KEY}"  # Must be set

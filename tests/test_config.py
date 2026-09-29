@@ -89,4 +89,3 @@ def test_validate_reports_multiple_errors_in_one_exception(monkeypatch):
     assert "MODEL_DIR is not set." in msg
     assert "LEDGERLENS_CONTRACT_ID is not set." in msg
     assert "LEDGERLENS_SUBMITTER_SECRET is not set." in msg
-

@@ -64,9 +64,7 @@ def queue_path(tmp_path: Path) -> Path:
     for ann in data["annotations"]:
         if ann.get("status") == "annotated":
             msg = f"{ann['wallet']}|{ann['label']}|{ann['annotator_id']}|{ann['annotated_at']}".encode()
-            ann["annotation_hmac"] = hmac.new(
-                SECRET.encode(), msg, hashlib.sha256
-            ).hexdigest()
+            ann["annotation_hmac"] = hmac.new(SECRET.encode(), msg, hashlib.sha256).hexdigest()
     save_queue(p, data["annotations"], SECRET)
     return p
 

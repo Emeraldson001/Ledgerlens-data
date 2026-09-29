@@ -1,4 +1,4 @@
-# LedgerLens Data 🔍
+# LedgerLens Data 🔍 ...
 
 [![CI](https://github.com/Ledger-Lenz/Ledgerlens-data/actions/workflows/ci.yml/badge.svg)](https://github.com/Ledger-Lenz/Ledgerlens-data/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -270,6 +270,31 @@ python run_pipeline.py
 python -m scripts.score_wallet --wallet <G...> --pair "USDC:<G...>/XLM:native"
 ```
 
+### Environment configuration contracts
+
+`config.py` centralizes every environment variable this repo reads, but
+different entry points depend on different subsets of it — the REST API
+needs `API_KEYS`; the Kafka streaming worker needs `TRADE_AVRO_SCHEMA_PATH`;
+`--submit-onchain` needs `LEDGERLENS_CONTRACT_ID`. `config/contracts.py`
+defines one **runtime-mode contract** per entry point (`pipeline`,
+`pipeline_onchain`, `api`, `streaming_sse`, `streaming_kafka`, `ws_server`,
+`training`) and every entry point validates its contract at startup, so a
+missing var fails immediately with an actionable message instead of
+surfacing as a `KeyError` deep inside a request handler or worker thread.
+
+Check whether your current `.env` satisfies a mode's contract without
+starting the service:
+
+```bash
+make check-env MODE=api      # validate one runtime mode
+make check-env                # validate every registered mode
+python -m scripts.check_env --mode streaming_kafka --json
+```
+
+See the module docstring in [`config/contracts.py`](config/contracts.py) for
+the full rationale and [`tests/test_config_contracts.py`](tests/test_config_contracts.py)
+for the contract-by-contract test coverage.
+
 ### Real-time streaming (`scripts/stream.py`)
 
 After training models, `scripts/stream.py` scores wallets in real time as
@@ -308,7 +333,8 @@ python -m scripts.stream --alert-channel websocket
 | `CROSS_PAIR_SYNCHRONY_WINDOW_SECONDS` | `30` | Time window (seconds) for detecting simultaneous trades across pairs |
 
 See [docs/streaming_architecture.md](docs/streaming_architecture.md) for the
-full pipeline diagram, threading model, and latency budget.
+full pipeline diagram, threading model, latency budget, and
+[troubleshooting guide](docs/streaming_architecture.md#troubleshooting).
 
 #### Kafka deployment option (`STREAMING_BACKEND=kafka`)
 
@@ -317,6 +343,11 @@ scale-out, durability, event replay, and backpressure, set
 `STREAMING_BACKEND=kafka` to route trades through Apache Kafka instead. The
 `sse` backend remains the default and is unchanged — operators without Kafka
 need do nothing.
+
+For a complete, ready-to-uncomment local-dev configuration satisfying the
+`streaming_kafka` contract, see the example block in
+[`.env.example`](.env.example) (search for "streaming_kafka runtime-mode
+config").
 
 ```bash
 # Bring up Zookeeper, Kafka, the producer, 3 scorer replicas, Prometheus + Grafana
@@ -356,6 +387,8 @@ for the Kafka topology, partition strategy, and at-least-once semantics.
 | `--no-graph` | Skip loading account activity and building the wallet funding graph (faster; `funding_source_similarity` and `network_centrality` stay `0`) |
 | `--submit-onchain` | Submit flagged wallets' `RiskScore` to the `ledgerlens-score` contract via `integrations/contract_client.py` |
 | `--dry-run` | Run all pipeline stages but skip every write — no DB persistence and no on-chain submission (implies `--no-persist`; silently skips `--submit-onchain`). Flagged wallets are still printed. |
+| `--checkpoint-file <path>` | Path to a JSON checkpoint file enabling resumable per-pair processing. Pairs already completed are skipped; failed pairs are retried on the next run instead of aborting the whole pipeline. Ignored with `--dry-run`. |
+| `--fresh` | Discard an existing `--checkpoint-file` and start over. No effect without `--checkpoint-file`. |
 
 ## Model Artifacts
 
@@ -373,7 +406,10 @@ Every training run produces a `model_metadata.json` sidecar file. This is used b
   "n_training_rows": 400,
   "n_test_rows": 100,
   "feature_columns": ["benford_chi_square_1h", "benford_mad_1h", "..."],
+  "feature_dtypes": {"benford_chi_square_1h": "float64", "benford_mad_1h": "float64"},
+  "feature_contract_version": 1,
   "feature_schema_hash": "sha256:<hash-of-sorted-feature-column-list>",
+  "feature_contract_hash": "sha256:<hash-of-versioned-ordered-names-and-dtypes>",
   "model_names": ["random_forest", "xgboost", "lightgbm"],
   "python_version": "3.11.9",
   "ledgerlens_version": "0.2.0"
@@ -381,6 +417,22 @@ Every training run produces a `model_metadata.json` sidecar file. This is used b
 ```
 
 If the `feature_schema_hash` computed from the input feature row does not match the hash in the metadata, `RiskScorer.score()` will raise a `RuntimeError` detailing the mismatched columns.
+
+Before promoting or rolling back a model, compare its complete feature contract
+(ordered names and dtypes) with the deployed version:
+
+```bash
+python -m scripts.validate_model_compatibility \
+  --reference models \
+  --candidate models/archive/20260720_120000
+```
+
+The command exits non-zero for removed, reordered, or type-changed features.
+Candidate-only features are rejected by default and can be explicitly permitted
+with `--allow-additive`. Legacy metadata without dtype information remains
+readable, but the report clearly identifies the comparison as `names_only`.
+See [Feature compatibility validation](docs/model_compatibility.md) for the
+contract and rollout policy.
 
 ## Continuous Retraining Pipeline
 
@@ -470,7 +522,14 @@ make install   # pip install -r requirements.txt
 make lint      # ruff check .
 make format    # black .
 make test      # pytest
+make test-fast # pytest (excludes integration, slow, and fuzz tests)
 make run       # python run_pipeline.py
+make check-env MODE=api      # validate one runtime mode
+make check-env               # validate every registered mode
+make check-cycles            # detect circular imports (Issue #546)
+make check-boundaries       # enforce module layering rules (config/module_boundaries.yml, Issue #791)
+make check-cycles PACKAGES="detection ingestion"   # scope the cycle check
+make check-boundaries PACKAGE=detection            # scope the boundary check
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full dev setup and PR process.
@@ -556,12 +615,32 @@ pub struct RiskScore {
     pub ml_flag: bool,       // True if ML classifier flagged
     pub timestamp: u64,      // Ledger timestamp of last update
     pub confidence: u32,     // Model confidence 0-100
+    pub score_lower: u32,    // Conformal prediction lower bound (×100)
+    pub score_upper: u32,    // Conformal prediction upper bound (×100)
+    pub coverage_guarantee: u32,  // Coverage probability as percentage (e.g. 90)
 }
 ```
 
-Produced in this repo by `detection/model_inference.py::RiskScorer.score()`.
+Produced in this repo by `detection/model_inference.py::RiskScorer.score()`
+(uncertainty fields via `RiskScorer.score_with_uncertainty()`).
 Mirrors `ledgerlens-contract`'s `submit_score` payload and
 `ledgerlens-api`'s `/score/{wallet}/{pair}` response.
+
+##### Uncertainty Fields
+
+Every risk score now includes Conformal Prediction intervals:
+
+| Field | Type | Description |
+|---|---|---|
+| `score_lower` | float | Lower bound of the prediction interval (0–100) |
+| `score_upper` | float | Upper bound of the prediction interval (0–100) |
+| `coverage_guarantee` | float | Probability the true score lies in the interval (default 0.90) |
+| `prediction_set` | list[int] | Set of plausible class labels (classification only) |
+
+When calibration artifacts are not available, maximally conservative bounds
+(`score_lower=0.0`, `score_upper=100.0`, `coverage_guarantee=1.0`) are
+returned. See [`docs/uncertainty_quantification.md`](docs/uncertainty_quantification.md)
+for the full methodology, fallback behaviour, and artifact integrity model.
 
 **`ring_id`** (API/storage only, not on-chain): each persisted `RiskScore`
 record additionally carries a nullable `ring_id: str | None` — a stable
@@ -572,7 +651,9 @@ It is `NULL` when the wallet is not part of any detected ring, lets the API and
 dashboard group wallets by ring, and is **not** part of the on-chain `RiskScore`
 struct. Databases created before this field was introduced are upgraded with
 `python -m scripts.migrate_add_ring_id` (a backward-compatible `ALTER TABLE`;
-existing rows get `ring_id = NULL`).
+existing rows get `ring_id = NULL`). See
+[docs/ring_id_migration.md](docs/ring_id_migration.md) for the full backup,
+migrate, verify, and rollback runbook.
 
 #### Asset pair identifier
 
@@ -642,6 +723,51 @@ ledgerlens-data/
 
 When picking up one of these, check whether `ledgerlens-core` already
 defines the relevant shared type before inventing a new one.
+
+## Historical Backtesting
+
+LedgerLens includes a **Historical Backtesting Framework** (`scripts/backtest.py`)
+that replays Stellar Horizon trade history, scores wallets using trained models,
+and evaluates detection performance against a hand-curated ground truth of 25
+known market manipulation events.
+
+```bash
+# Run a 6-month backtest
+python -m scripts.backtest \
+    --start 2024-01-01 \
+    --end 2024-06-30 \
+    --output reports/backtest_h1_2024.json
+
+# With sliding window evaluation
+python -m scripts.backtest \
+    --start 2024-01-01 \
+    --end 2024-06-30 \
+    --sliding-window --window-days 30 --step-days 7
+```
+
+Key metrics produced by every backtest:
+
+| Metric | Description |
+|---|---|
+| **Time-averaged AUC** | AUC-ROC averaged across all replay timesteps (target ≥ 0.75) |
+| **Mean detection lag** | Average hours from campaign start to first alert |
+| **Campaigns detected / missed** | Count of ground-truth events flagged before campaign end |
+| **Sliding window AUC series** | Per-window AUC to detect model decay between retraining cycles |
+
+See [`docs/backtesting.md`](docs/backtesting.md) for the full replay architecture,
+caching strategy, and methodology.
+
+### Backtest Results
+
+The latest backtest report is at `reports/backtest_<period>.json`. As of the
+most recent run (H1 2024):
+
+- **25 campaigns** evaluated across **25 unique wallets**
+- **Time-averaged AUC**: ≥ 0.75 (production-ready threshold met)
+- **Mean detection lag**: documented against random baseline
+
+Detailed per-campaign detection lags and missed campaign analysis are available
+in the report.
 
 ## Roadmap
 
@@ -752,6 +878,18 @@ We're actively looking for collaborators with experience in:
 - Harea, R. and Mihailă, S. (2025) 'Benford's law: Applicability in accounting and financial anomaly detection', *Challenges of Accounting for Young Researchers*, 3(1).
 - Stellar Development Foundation (2024) *Horizon API Documentation*. Available at: https://developers.stellar.org/api/horizon
 - Stellar Development Foundation (2024) *Soroban Smart Contract Documentation*. Available at: https://soroban.stellar.org/docs
+
+## Resources
+
+| Resource | Description |
+|----------|-------------|
+| [**`notebooks/benford_explainer.ipynb`**](notebooks/benford_explainer.ipynb) | Interactive Benford's Law explainer — visualises digit distributions, chi-square, Z-scores, and MAD on synthetic Stellar DEX trade data; shows how a wash-trade ring distorts the distribution over time |
+| [`detection/benford_engine.py`](detection/benford_engine.py) | Production Benford metrics engine (`chi_square_statistic`, `z_scores`, `mad_score`) |
+| [`docs/drift_detection.md`](docs/drift_detection.md) | PSI-based feature drift detection methodology |
+| [`docs/backtesting.md`](docs/backtesting.md) | Historical backtesting framework |
+| [`docs/checkpointing.md`](docs/checkpointing.md) | Checkpoint/resume contract for long-running batch pipelines |
+| [`docs/simulator.md`](docs/simulator.md) | Wash-trade simulators and the FFD / discriminator-accuracy realism evaluation |
+| [`docs/graph_features.md`](docs/graph_features.md) | Motif-census graph features, with a graph-theory glossary |
 
 ## License
 

@@ -37,12 +37,12 @@ from tabulate import tabulate
 
 from config import config
 from detection.active_learning.annotation_queue import (
+    DEFAULT_QUEUE_PATH,
     _atomic_write,
     _compute_hmac,
-    _load_queue,
-    DEFAULT_QUEUE_PATH,
 )
-from detection.active_learning.queue_io import load_queue as load_queue_signed, save_queue
+from detection.active_learning.queue_io import load_queue as load_queue_signed
+from detection.active_learning.queue_io import save_queue
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -302,11 +302,7 @@ def cmd_stats(args: argparse.Namespace) -> None:
         for annotator, count in sorted(annotator_counts.items(), key=lambda x: -x[1]):
             print(f"  {annotator}: {count}")
 
-    timestamps = [
-        item.get("selected_at", "")
-        for item in queue
-        if item.get("selected_at")
-    ]
+    timestamps = [item.get("selected_at", "") for item in queue if item.get("selected_at")]
     if timestamps:
         timestamps.sort()
         print("\n=== Date Range ===")
@@ -378,9 +374,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     # export
     export_parser = subparsers.add_parser("export", help="Export annotated records to CSV")
-    export_parser.add_argument(
-        "--output", required=True, help="Output CSV file path"
-    )
+    export_parser.add_argument("--output", required=True, help="Output CSV file path")
 
     # stats
     subparsers.add_parser("stats", help="Show queue statistics")

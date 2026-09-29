@@ -16,7 +16,11 @@ buffered into a DataFrame) for a single wallet.
 
 from __future__ import annotations
 
+import json as _json
+import logging
 import math
+import os as _os
+from typing import Any
 
 import networkx as nx
 import numpy as np
@@ -36,6 +40,69 @@ from detection.wallet_graph import (
     detect_wash_trading_rings,
 )
 from ingestion.data_models import AccountActivity
+from utils.tracing import get_tracer, hash_span_id
+
+logger = logging.getLogger(__name__)
+_tracer = get_tracer(__name__)
+
+# ---------------------------------------------------------------------------
+# Provenance tracking (Issue #244)
+# ---------------------------------------------------------------------------
+
+_PROVENANCE_ENABLED = _os.getenv("FEATURE_PROVENANCE_ENABLED", "false").lower() == "true"
+
+# Base window-aggregate Benford feature prefixes — provenance is only tracked
+# for these, not for derived ratios or calibrated variants.
+_PROVENANCE_FEATURE_PREFIXES = (
+    "benford_chi_square_",
+    "benford_mad_",
+    "benford_z_max_",
+)
+
+
+class ProvenanceTracker:
+    """Records which trade IDs (Horizon paging tokens) contributed to each feature.
+
+    When ``enabled=False`` (the default, controlled by ``FEATURE_PROVENANCE_ENABLED``),
+    all operations are no-ops and ``to_json()`` returns ``None`` — no storage
+    overhead is incurred.
+
+    Only base window-aggregate Benford features are tracked; derived features
+    (ratios, calibrated variants, GNN embeddings) are excluded.
+
+    Usage::
+
+        tracker = ProvenanceTracker()
+        tracker.record("benford_chi_square_24h", trade_ids=df["trade_id"].tolist())
+        provenance_blob = tracker.to_json()  # stored in risk_score DB
+    """
+
+    def __init__(self, enabled: bool = _PROVENANCE_ENABLED) -> None:
+        self.enabled = enabled
+        self._data: dict[str, list[str]] = {}
+
+    def record(self, feature_name: str, trade_ids: list[str]) -> None:
+        """Associate *trade_ids* with *feature_name*.
+
+        Only records when enabled and the feature is a base window-aggregate
+        (prefix matches ``_PROVENANCE_FEATURE_PREFIXES``).
+        """
+        if not self.enabled:
+            return
+        if not any(feature_name.startswith(p) for p in _PROVENANCE_FEATURE_PREFIXES):
+            return
+        self._data[feature_name] = list(trade_ids)
+
+    def to_json(self) -> str | None:
+        """Serialise provenance as a JSON string, or ``None`` when disabled."""
+        if not self.enabled:
+            return None
+        return _json.dumps(self._data)
+
+    def get(self, feature_name: str) -> list[str]:
+        """Return the trade IDs recorded for *feature_name* (empty list if none)."""
+        return self._data.get(feature_name, [])
+
 
 FEATURE_DESCRIPTIONS: dict[str, str] = {
     # Benford features — 5 windows (1h, 4h, 24h, 168h, 720h)
@@ -150,6 +217,45 @@ FEATURE_DESCRIPTIONS: dict[str, str] = {
         "Benford non-conformity is equally distributed across all pairs — "
         "consistent with a systematic automated trading pattern."
     ),
+    # Cross-chain features
+    "solana_linked_wash_score": (
+        "Risk score of a linked Solana address (via Wormhole bridge) if found. "
+        "If the Stellar wallet has a linked Solana address and that address's "
+        "Solana-chain risk score is available (from external provider, cached), "
+        "this feature surfaces that signal. Value [0, 100]; 0 if no link found."
+    ),
+    # Temporal KGE features
+    "temporal_kge_collab_score": (
+        "Predicted collaboration likelihood from temporal knowledge graph embedding. "
+        "TComplEx model scores likelihood of future trading relationships based on "
+        "temporal patterns of co-trading with common counterparties. Values near 1.0 "
+        "indicate predicted imminent collaboration (wash trade signal)."
+    ),
+    # Bot fingerprint features
+    "bot_trust_line_latency": (
+        "Time in seconds from account creation to first trust line. Bots rapidly "
+        "create trust lines for multiple assets within seconds; humans typically "
+        "create them on-demand over hours/days. Values <60s are strong bot signal."
+    ),
+    "bot_interval_regularity": (
+        "Coefficient of variation (population std / mean) of inter-trade intervals. "
+        "Bots trade with mechanical regularity (CV<0.1); humans have irregular patterns (CV>0.3). "
+        "Returns None (mapped to 0.0 for feature matrix) if fewer than 5 trades."
+    ),
+    "bot_op_entropy": (
+        "Shannon entropy of Horizon operation type distribution (in bits). Bots cluster "
+        "specific operations (low entropy); humans diversify (high entropy). Values <1.5 "
+        "indicate bot-like clustering."
+    ),
+    # Trade pattern features (continued)
+    "counterparty_variance": (
+        "Variance of per-counterparty trade volume normalised by mean volume squared "
+        "(dimensionless coefficient of variation squared, CV²). Wash-trade rings that "
+        "use decoy counterparties show high variance: the primary counterparty receives "
+        "most volume while decoys receive a tiny fraction each, inflating the apparent "
+        "counterparty count while disguising true concentration. "
+        "Range: [0, 1] (clipped). Higher = more suspicious."
+    ),
 }
 
 
@@ -159,6 +265,7 @@ def compute_benford_features(
     liquidity_profiler=None,
     asset: str | None = None,
     precomputed_metrics: dict[int, BenfordMetrics] | None = None,
+    provenance: ProvenanceTracker | None = None,
 ) -> dict:
     """Flatten per-window Benford metrics into a feature row.
 
@@ -176,14 +283,47 @@ def compute_benford_features(
     When ``decompose=True``, also adds ``benford_residual_chi_square_{h}h``
     and ``benford_residual_mad_{h}h`` — Benford metrics on STL residuals.
     Residual features are set to ``NaN`` for insufficient-data windows.
+
+    When *provenance* is provided (and ``FEATURE_PROVENANCE_ENABLED=True``),
+    records the Horizon paging-token trade IDs that contributed to each
+    window's Benford aggregate.
     """
     per_window = precomputed_metrics or compute_benford_metrics_for_windows(wallet_trades)
+
+    # Pre-compute per-window trade ID sets for provenance recording.
+    _window_trade_ids: dict[int, list[str]] = {}
+    if provenance is not None and provenance.enabled and not wallet_trades.empty:
+        id_col = next(
+            (c for c in ("trade_id", "id", "paging_token") if c in wallet_trades.columns), None
+        )
+        if id_col is not None:
+            ts_col = next(
+                (
+                    c
+                    for c in ("ledger_close_time", "timestamp", "time")
+                    if c in wallet_trades.columns
+                ),
+                None,
+            )
+            for hours in per_window:
+                if ts_col is not None:
+                    cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=hours)
+                    mask = pd.to_datetime(wallet_trades[ts_col], utc=True) >= cutoff
+                    ids = wallet_trades.loc[mask, id_col].astype(str).tolist()
+                else:
+                    ids = wallet_trades[id_col].astype(str).tolist()
+                _window_trade_ids[hours] = ids
 
     features: dict = {}
     for hours, metrics in per_window.items():
         features[f"benford_chi_square_{hours}h"] = metrics["chi_square"]
         features[f"benford_mad_{hours}h"] = metrics["mad"]
         features[f"benford_z_max_{hours}h"] = max(metrics["z_scores"].values(), default=0.0)
+        if provenance is not None and hours in _window_trade_ids:
+            ids = _window_trade_ids[hours]
+            provenance.record(f"benford_chi_square_{hours}h", ids)
+            provenance.record(f"benford_mad_{hours}h", ids)
+            provenance.record(f"benford_z_max_{hours}h", ids)
 
     if decompose and not wallet_trades.empty:
         for hours, res_metrics in _compute_residual_benford_for_windows(wallet_trades).items():
@@ -194,6 +334,18 @@ def compute_benford_features(
         _add_calibrated_benford_features(
             features, wallet_trades, per_window, liquidity_profiler, asset
         )
+
+    # Bootstrap CI width — only computed when BENFORD_CI_ENABLED=True
+    if config.BENFORD_CI_ENABLED and not wallet_trades.empty:
+        from detection.benford_engine import compute_benford_confidence_intervals
+
+        amounts = (
+            wallet_trades["amount"] if "amount" in wallet_trades.columns else pd.Series(dtype=float)
+        )
+        ci = compute_benford_confidence_intervals(amounts)
+        features["benford_ci_width"] = ci["chi_square_ci_width"]
+    else:
+        features["benford_ci_width"] = np.nan
 
     return features
 
@@ -274,40 +426,6 @@ def _compute_residual_benford_for_windows(
     return results
 
 
-def compute_graph_embedding_features(
-    wallet: str,
-    funding_graph: nx.DiGraph,
-    gnn_encoder: object,
-) -> dict[str, float]:
-    """Return GNN embedding features for a wallet.
-
-    This function attempts to compute an embedding for ``wallet`` using the
-    provided ``gnn_encoder`` and ``funding_graph``. If embedding computation
-    fails (e.g., missing wallet node, encoder error), it returns a zero vector
-    of length ``config.GNN_EMBEDDING_DIM``.
-
-    Args:
-        wallet: Stellar account id to compute embeddings for.
-        funding_graph: Directed funding graph used as input to the encoder.
-        gnn_encoder: Encoder instance that provides an ``encode(graph, wallet)``
-            method returning an indexable embedding vector.
-
-    Returns:
-        A dictionary mapping feature names ``gnn_0``..``gnn_{N-1}`` to floats,
-        where ``N`` is ``config.GNN_EMBEDDING_DIM``.
-
-    Raises:
-        Any exceptions raised by the encoder are caught and will not be
-        propagated.
-    """
-    try:
-
-        emb = gnn_encoder.encode(funding_graph, wallet)  # type: ignore[attr-defined]
-        return {f"gnn_{i}": float(emb[i]) for i in range(len(emb))}
-    except Exception:
-        return {f"gnn_{i}": 0.0 for i in range(config.GNN_EMBEDDING_DIM)}
-
-
 def compute_order_cancellation_rate(wallet: str, orderbook_events: pd.DataFrame | None) -> float:
     """Fraction of a wallet's manage-offer operations that were cancellations.
 
@@ -315,6 +433,14 @@ def compute_order_cancellation_rate(wallet: str, orderbook_events: pd.DataFrame 
     `ingestion.orderbook_loader.load_accounts_orderbook_events` (or `None`/
     empty if order-book ingestion wasn't run), with an `account` and
     `action` ("created"/"cancelled"/"updated") column.
+
+    The `action` count here counts every manage-offer operation the loader
+    classified as `cancelled`. A `cancelled` operation covers both an offer
+    that was withdrawn while still fully unfilled (a pure cancellation) and
+    the cancellation of the remainder of an offer that was previously
+    partially filled. Horizon records partial fills in the trade stream, not
+    as manage-offer operations, so the loader cannot distinguish the two
+    cases and both contribute identically to the rate.
     """
     if orderbook_events is None or orderbook_events.empty:
         return 0.0
@@ -360,6 +486,11 @@ def compute_trade_pattern_features(
           ``round_trip_frequency``.
         - ``order_cancellation_rate``: Fraction of the wallet's manage-offer
           operations that were cancellations.
+        - ``counterparty_variance``: Variance of per-counterparty trade volume
+          normalised by mean volume squared (dimensionless CV²). Values near
+          0 indicate balanced multi-counterparty trading; values near 1
+          indicate extreme concentration with decoy counterparties.
+          Range: [0, 1] (clipped). Higher = more suspicious.
 
     Raises:
         KeyError: If required columns (e.g., ``base_account``,
@@ -374,12 +505,21 @@ def compute_trade_pattern_features(
             "net_roundtrip_ratio": 0.0,
             "self_matching_rate": 0.0,
             "order_cancellation_rate": order_cancellation_rate,
+            "counterparty_variance": 0.0,
         }
+
+    # Accept raw trade records that only have base_amount (no unified
+    # "amount" column yet) — same fallback convention as scripts/mine_roundtrips.py.
+    amount_col = (
+        wallet_trades["amount"]
+        if "amount" in wallet_trades.columns
+        else wallet_trades["base_amount"]
+    )
 
     counterparty_col = wallet_trades["base_account"].where(
         wallet_trades["base_account"] != wallet, wallet_trades["counter_account"]
     )
-    volume_by_counterparty = wallet_trades.groupby(counterparty_col)["amount"].sum()
+    volume_by_counterparty = amount_col.groupby(counterparty_col).sum()
     total_volume = volume_by_counterparty.sum()
     concentration = (volume_by_counterparty.max() / total_volume) if total_volume else 0.0
 
@@ -390,12 +530,33 @@ def compute_trade_pattern_features(
 
     self_matching_rate = round_trip_frequency  # same accounts trading with themselves
 
+    # counterparty_variance — worked example from docs/contributor_feature_guide.md
+    # Normalised variance (CV²) of per-counterparty volume. Wash-trade rings that
+    # use decoy counterparties will show high variance: the primary counterparty
+    # receives most volume while decoys receive a tiny fraction each.
+    if len(volume_by_counterparty) >= 2:
+        mean_vol = float(volume_by_counterparty.mean())
+        var_vol = float(volume_by_counterparty.var(ddof=0))
+        counterparty_variance = (var_vol / (mean_vol**2)) if mean_vol > 0 else 0.0
+        counterparty_variance = max(0.0, min(1.0, counterparty_variance))
+    else:
+        counterparty_variance = 0.0
+
+    if not (0.0 <= counterparty_variance <= 1.0):
+        logger.warning(
+            "counterparty_variance out of expected range [0, 1]: %.4f for wallet %s — clamping",
+            counterparty_variance,
+            wallet,
+        )
+        counterparty_variance = max(0.0, min(1.0, counterparty_variance))
+
     return {
         "counterparty_concentration_ratio": float(concentration),
         "round_trip_frequency": float(round_trip_frequency),
         "net_roundtrip_ratio": float(round_trip_frequency),
         "self_matching_rate": float(self_matching_rate),
         "order_cancellation_rate": order_cancellation_rate,
+        "counterparty_variance": float(counterparty_variance),
     }
 
 
@@ -758,7 +919,7 @@ def compute_cross_asset_features(
             # Average MAD across all windows for this pair
             per_pair_metrics[pair_id] = BenfordMetrics(
                 chi_square=0.0,
-                mad=(sum(m.mad for m in metrics.values()) / len(metrics) if metrics else 0.0),
+                mad=(sum(m["mad"] for m in metrics.values()) / len(metrics) if metrics else 0.0),
                 mad_nonconforming=False,
                 z_scores={},
                 sample_size=0,
@@ -841,6 +1002,261 @@ def compute_graph_embedding_features(
         return zero_features
 
 
+def compute_solana_linked_features(
+    wallet: str,
+    identity_graph=None,
+    solana_risk_cache: dict[str, float] | None = None,
+) -> dict:
+    """Compute features based on linked Solana addresses via Wormhole bridge.
+
+    Queries the identity graph to find Solana addresses linked to a Stellar
+    wallet via Wormhole bridge transactions. If found and a cached risk score
+    is available for the Solana address, surfaces that signal.
+
+    Args:
+        wallet: Stellar account id to score.
+        identity_graph: IdentityGraph instance (from detection.cross_chain.identity_graph).
+            If None, returns zero features.
+        solana_risk_cache: Optional cache mapping Solana address -> risk_score.
+            Risk scores should be in [0, 100]. If None or address not in cache,
+            returns 0.0.
+
+    Returns:
+        A dictionary with:
+        - ``solana_linked_wash_score``: highest risk score among linked Solana
+          addresses, or 0.0 if none found.
+
+    Raises:
+        Any exceptions from the identity graph are caught and logged.
+    """
+    if identity_graph is None or solana_risk_cache is None:
+        return {"solana_linked_wash_score": 0.0}
+
+    try:
+        # Resolve Stellar wallet to linked Solana addresses
+        component = identity_graph.get_connected_component(wallet)
+        linked_sol_addresses = [node["address"] for node in component.get("sol", [])]
+
+        if not linked_sol_addresses:
+            return {"solana_linked_wash_score": 0.0}
+
+        # Find max risk score among linked Solana addresses
+        max_risk_score = 0.0
+        for sol_addr in linked_sol_addresses:
+            if sol_addr in solana_risk_cache:
+                risk = solana_risk_cache[sol_addr]
+                max_risk_score = max(max_risk_score, float(risk))
+
+        return {"solana_linked_wash_score": max_risk_score}
+
+    except Exception as exc:
+        logger.error("Failed to compute Solana linked features for %s: %s", wallet, exc)
+        return {"solana_linked_wash_score": 0.0}
+
+
+def compute_temporal_kge_features(
+    wallet: str,
+    counterparties: list[str] | None = None,
+    kge_encoder=None,
+) -> dict:
+    """Compute temporal KGE collaboration prediction features.
+
+    Uses the trained TComplEx model to predict likelihood of future
+    collaboration with known counterparties based on temporal trading patterns.
+
+    Args:
+        wallet: Stellar account ID to analyze.
+        counterparties: List of wallet IDs to score against (typically the
+            wallet's historical trading partners). When None or empty, returns
+            zero-valued feature.
+        kge_encoder: TemporalKGEncoder instance (optional). When provided,
+            computes collaboration scores; when None, returns 0.0.
+
+    Returns:
+        A dictionary with:
+
+        - ``temporal_kge_collab_score``: Maximum predicted collaboration score
+          across all counterparties. Ranges [0.0, 1.0] where 1.0 indicates
+          high predicted likelihood of imminent trading relationship.
+    """
+    if not counterparties or not kge_encoder:
+        return {"temporal_kge_collab_score": 0.0}
+
+    try:
+        scores = []
+        for counterparty in counterparties:
+            score = kge_encoder.predict_collaboration_score(wallet, counterparty)
+            scores.append(score)
+
+        # Return maximum score (highest predicted collaboration risk)
+        max_score = max(scores) if scores else 0.0
+        return {"temporal_kge_collab_score": float(max_score)}
+
+    except Exception as e:
+        logger.warning(f"Temporal KGE prediction failed for {wallet}: {e}")
+        return {"temporal_kge_collab_score": 0.0}
+
+
+def compute_bot_fingerprint_features(
+    wallet: str,
+    wallet_trades: pd.DataFrame | None = None,
+    bot_fingerprint: object | None = None,
+) -> dict:
+    """Compute bot detection fingerprint features.
+
+    Extracts behavioral signatures from Horizon events and trade patterns
+    that distinguish bots from humans: trust line latency, trading regularity,
+    and operation clustering.
+
+    Args:
+        wallet: Stellar account ID.
+        wallet_trades: DataFrame of trades involving the wallet.
+        bot_fingerprint: BotFingerprint object from detection.bot_fingerprinter.
+            When None, returns zero-valued features.
+
+    Returns:
+        A dictionary with three bot detection features:
+        - bot_trust_line_latency: Seconds from account creation to first trust line
+        - bot_interval_regularity: Coefficient of variation of inter-trade intervals
+        - bot_op_entropy: Shannon entropy of operation type distribution
+    """
+    if not bot_fingerprint:
+        return {
+            "bot_trust_line_latency": 0.0,
+            "bot_interval_regularity": 0.0,
+            "bot_op_entropy": 0.0,
+        }
+
+    try:
+        # Import here to avoid circular dependency
+        from ingestion.data_models import BotFingerprint
+
+        if not isinstance(bot_fingerprint, BotFingerprint):
+            return {
+                "bot_trust_line_latency": 0.0,
+                "bot_interval_regularity": 0.0,
+                "bot_op_entropy": 0.0,
+            }
+
+        features = {
+            "bot_trust_line_latency": float(
+                bot_fingerprint.trust_line_creation_latency_seconds or 0.0
+            ),
+            "bot_interval_regularity": float(bot_fingerprint.inter_trade_interval_cv or 0.0),
+            "bot_op_entropy": float(bot_fingerprint.account_management_cluster_score),
+        }
+
+        return features
+
+    except Exception as e:
+        logger.warning(f"Bot fingerprint computation failed for {wallet}: {e}")
+        return {
+            "bot_trust_line_latency": 0.0,
+            "bot_interval_regularity": 0.0,
+            "bot_op_entropy": 0.0,
+        }
+
+
+def compute_payment_path_features(
+    wallet: str,
+    path_flows: list | None = None,
+) -> dict:
+    """Compute payment path analysis features for a wallet.
+
+    Wraps ``ingestion.payment_path_analyzer.compute_path_payment_round_trip_frequency``
+    and returns a single feature measuring how often multi-hop payment paths
+    form a closed (round-trip) cycle — a strong wash-trade signal.
+
+    Args:
+        wallet: Stellar account ID being scored.
+        path_flows: List of ``ReconstructedPathFlow`` dicts produced by
+            ``ingestion.payment_path_analyzer.reconstruct_path_flow``.
+            When ``None`` or empty, returns zero-valued features.
+
+    Returns:
+        A dictionary with:
+
+        - ``path_payment_round_trip_frequency``: Fraction of path payments
+          where the destination account equals the source account.
+          Range: [0.0, 1.0].  Higher = more suspicious.
+    """
+    if not path_flows:
+        return {"path_payment_round_trip_frequency": 0.0}
+
+    try:
+        from ingestion.payment_path_analyzer import compute_path_payment_round_trip_frequency
+
+        freq = compute_path_payment_round_trip_frequency(wallet, path_flows)
+        return {"path_payment_round_trip_frequency": float(freq)}
+    except Exception as exc:
+        logger.warning("compute_payment_path_features failed for %s: %s", wallet, exc)
+        return {"path_payment_round_trip_frequency": 0.0}
+
+
+def compute_ts_decomposition_features(wallet_trades: pd.DataFrame) -> dict:
+    """Compute STL-based time-series decomposition features for a wallet.
+
+    Delegates to ``detection.ts_decomposition.compute_ts_features`` which
+    runs STL (Seasonal-Trend decomposition via LOESS) on the hourly volume
+    series and returns three features.
+
+    Args:
+        wallet_trades: Trades involving the wallet.  Must contain
+            ``ledger_close_time`` and ``amount`` columns.
+
+    Returns:
+        A dictionary with:
+
+        - ``volume_trend_slope``: Normalised linear regression slope of
+          the hourly volume series.  ``NaN`` → 0.0 in ``build_feature_vector``.
+        - ``volume_seasonality_strength``: Fraction of variance explained by
+          the seasonal component.  Range: [0.0, 1.0].
+        - ``volume_residual_anomaly``: Fraction of hourly bins whose STL
+          residual exceeds mean + 2 std.  Range: [0.0, 1.0].
+
+    All three features are ``NaN`` (coerced to 0.0) when fewer than 48
+    hourly bins are available.
+    """
+    try:
+        from detection.ts_decomposition import compute_ts_features
+
+        return compute_ts_features(wallet_trades)
+    except Exception as exc:
+        logger.warning("compute_ts_decomposition_features failed: %s", exc)
+        return {
+            "volume_trend_slope": 0.0,
+            "volume_seasonality_strength": 0.0,
+            "volume_residual_anomaly": 0.0,
+        }
+
+
+# ---------------------------------------------------------------------------
+# One-time GNN zero-fallback warning
+# ---------------------------------------------------------------------------
+
+# Sentinel so the warning fires at most once per interpreter session, avoiding
+# log spam when the pipeline processes thousands of wallets without a trained
+# encoder.
+_gnn_zero_fallback_warned: bool = False
+
+
+def _warn_gnn_zero_fallback() -> None:
+    """Emit a single WARNING the first time the all-zeros GNN fallback is used.
+
+    This signals to operators that ring-detection performance may be weaker
+    than expected because no trained GNN encoder is available yet.
+    """
+    global _gnn_zero_fallback_warned
+    if not _gnn_zero_fallback_warned:
+        logger.warning(
+            "GNN encoder not available — all gnn_0…gnn_%d features are set to 0.0. "
+            "Ring-detection signals from the graph embedding layer will be absent. "
+            "Run 'python -m detection.model_training --with-gnn' to train the encoder.",
+            config.GNN_EMBEDDING_DIM - 1,
+        )
+        _gnn_zero_fallback_warned = True
+
+
 def build_feature_vector(
     wallet: str,
     wallet_trades: pd.DataFrame,
@@ -854,6 +1270,11 @@ def build_feature_vector(
     pair_benford_sketches: dict | None = None,
     community_map: dict[str, int] | None = None,
     ring_stats: dict[int, dict] | None = None,
+    path_flows: list | None = None,
+    kge_encoder=None,
+    wallet_counterparties: list[str] | None = None,
+    seq_model=None,
+    pair_vocab: dict | None = None,
 ) -> dict:
     """Assemble the full feature row for a single wallet.
 
@@ -864,8 +1285,55 @@ def build_feature_vector(
     output of `detection.wallet_graph.build_funding_graph`, used for the
     wallet graph features. `all_pairs_df` (optional) enables cross-asset
     coordination features. `amm_trades` (optional) enables cross-venue
-    coordination features.
+    coordination features. `path_flows` (optional) is a list of
+    ReconstructedPathFlow dicts from `ingestion.payment_path_analyzer`,
+    used to compute payment path analysis features. `kge_encoder` (optional)
+    is a TemporalKGEncoder instance; when provided along with
+    `wallet_counterparties`, computes temporal KGE collaboration scores.
     """
+    with _tracer.start_as_current_span("features.computed") as span:
+        span.set_attribute("wallet.id", hash_span_id(wallet))
+        span.set_attribute("trade.count", len(wallet_trades))
+        return _build_feature_vector_inner(
+            wallet,
+            wallet_trades,
+            activity,
+            orderbook_events,
+            funding_graph,
+            all_pairs_df,
+            amm_trades,
+            gnn_encoder,
+            benford_metrics,
+            pair_benford_sketches,
+            community_map,
+            ring_stats,
+            path_flows,
+            kge_encoder,
+            wallet_counterparties,
+            seq_model,
+            pair_vocab,
+        )
+
+
+def _build_feature_vector_inner(
+    wallet: str,
+    wallet_trades,
+    activity=None,
+    orderbook_events=None,
+    funding_graph=None,
+    all_pairs_df=None,
+    amm_trades=None,
+    gnn_encoder=None,
+    benford_metrics=None,
+    pair_benford_sketches=None,
+    community_map=None,
+    ring_stats=None,
+    path_flows=None,
+    kge_encoder=None,
+    wallet_counterparties=None,
+    seq_model=None,
+    pair_vocab=None,
+):
     reference_time = (
         pd.to_datetime(wallet_trades["ledger_close_time"], utc=True).max()
         if not wallet_trades.empty
@@ -887,15 +1355,45 @@ def build_feature_vector(
                 wallet, all_pairs_df, pair_benford_sketches=pair_benford_sketches
             )
         )
+    features.update(compute_payment_path_features(wallet, path_flows))
+    features.update(compute_temporal_kge_features(wallet, wallet_counterparties, kge_encoder))
     features.update(compute_hardening_features(wallet_trades))
+    features.update(compute_ts_decomposition_features(wallet_trades))
     if amm_trades is not None:
         features.update(compute_cross_venue_features(wallet, wallet_trades, amm_trades))
+    features["bridge_round_trip_ratio"] = 0.0  # populated by callers that supply bridge tx data
 
     # GNN embedding features — graceful zero-fallback when encoder is absent
     if gnn_encoder is not None and funding_graph is not None:
         features.update(compute_graph_embedding_features(wallet, funding_graph, gnn_encoder))
     else:
+        _warn_gnn_zero_fallback()
         features.update({f"gnn_{i}": 0.0 for i in range(config.GNN_EMBEDDING_DIM)})
+
+    # Sequence model embedding features (#182) — graceful zero-fallback when model absent.
+    # The embedding is concatenated to the feature vector before being passed to the
+    # ensemble calibrator.  Before the first training run, all-zeros are returned so the
+    # feature schema stays consistent.
+    if seq_model is not None and config.SEQ_MODEL_ENABLED:
+        try:
+            from detection.trade_sequence_transformer import build_sequence_embedding
+
+            seq_embedding = build_sequence_embedding(
+                wallet_trades,
+                seq_model,
+                pair_vocab=pair_vocab,
+            )
+        except Exception as _e:
+            logger.warning("Sequence embedding failed for wallet %s: %s", wallet, _e)
+            seq_embedding = None
+    else:
+        seq_embedding = None
+
+    if seq_embedding is None:
+        seq_embedding = __import__("numpy").zeros(config.SEQ_MODEL_EMBED_DIM, dtype="float32")
+
+    for i, v in enumerate(seq_embedding):
+        features[f"seq_{i}"] = float(v)
 
     return {k: (0.0 if isinstance(v, float) and pd.isna(v) else v) for k, v in features.items()}
 
@@ -982,6 +1480,20 @@ def build_feature_matrix(
     if trades_df.empty:
         return pd.DataFrame()
 
+    # Feature calculations are statistical and use NumPy/pandas division.
+    # Normalize Decimal ledger amounts once so behavior is consistent across
+    # pandas versions (older releases reject Decimal / float operations).
+    trades_df = trades_df.copy()
+    if "amount" in trades_df:
+        trades_df["amount"] = pd.to_numeric(trades_df["amount"], errors="coerce").astype(float)
+    if all_pairs_df is None or all_pairs_df is trades_df:
+        all_pairs_df = trades_df
+    elif "amount" in all_pairs_df:
+        all_pairs_df = all_pairs_df.copy()
+        all_pairs_df["amount"] = pd.to_numeric(all_pairs_df["amount"], errors="coerce").astype(
+            float
+        )
+
     if funding_graph is not None and community_map is None:
         community_map = detect_wash_trading_rings(funding_graph)
         ring_stats = build_ring_statistics(community_map, funding_graph)
@@ -996,7 +1508,7 @@ def build_feature_matrix(
             trades_df[mask],
             orderbook_events=orderbook_events,
             funding_graph=funding_graph,
-            all_pairs_df=all_pairs_df if all_pairs_df is not None else trades_df,
+            all_pairs_df=all_pairs_df,
             amm_trades=amm_trades,
             community_map=community_map,
             ring_stats=ring_stats,
@@ -1006,3 +1518,203 @@ def build_feature_matrix(
         rows.append(row)
 
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Feature range validation (data/feature_dictionary.md)
+# ---------------------------------------------------------------------------
+
+#: Hard theoretical bounds for every named feature.
+#: Values outside [min, max] trigger a WARNING from validate_feature_ranges().
+#: GNN embedding dimensions are intentionally excluded — their range is
+#: model-dependent and validated separately.
+FEATURE_RANGES: dict[str, tuple[float, float]] = {
+    # Benford features — 5 windows
+    **{f"benford_chi_square_{h}h": (0.0, float("inf")) for h in [1, 4, 24, 168, 720]},
+    **{f"benford_mad_{h}h": (0.0, 1.0) for h in [1, 4, 24, 168, 720]},
+    **{f"benford_z_max_{h}h": (0.0, float("inf")) for h in [1, 4, 24, 168, 720]},
+    # Residual Benford — 5 windows
+    **{f"benford_residual_chi_square_{h}h": (0.0, float("inf")) for h in [1, 4, 24, 168, 720]},
+    **{f"benford_residual_mad_{h}h": (0.0, 1.0) for h in [1, 4, 24, 168, 720]},
+    # Trade pattern features
+    "counterparty_concentration_ratio": (0.0, 1.0),
+    "round_trip_frequency": (0.0, 1.0),
+    "net_roundtrip_ratio": (0.0, 1.0),
+    "self_matching_rate": (0.0, 1.0),
+    "order_cancellation_rate": (0.0, 1.0),
+    # Volume and timing features
+    "volume_per_counterparty_ratio": (0.0, float("inf")),
+    "intra_minute_clustering": (0.0, 1.0),
+    "off_hours_activity_ratio": (0.0, 1.0),
+    "volume_spike_frequency": (0.0, 1.0),
+    # Wallet graph features
+    "funding_source_similarity": (0.0, 1.0),
+    "network_centrality": (0.0, 1.0),
+    "account_age_days": (0.0, float("inf")),
+    "ring_size": (0.0, float("inf")),
+    "ring_internal_density": (0.0, 1.0),
+    # Cross-asset coordination features
+    "cross_pair_trade_synchrony": (0.0, 1.0),
+    "net_asset_flow_deviation": (0.0, float("inf")),
+    "cross_pair_counterparty_overlap": (0.0, 1.0),
+    "cross_pair_volume_correlation": (-1.0, 1.0),
+    "pair_diversity_score": (0.0, 1.0),
+    "cross_pair_mad_std": (0.0, 1.0),
+    # Hardening features
+    "inter_arrival_cv": (0.0, float("inf")),
+    "entropy_of_amounts": (0.0, float("inf")),
+    "cross_wallet_volume_corr": (-1.0, 1.0),
+    # Cross-venue features
+    "venue_trade_ratio": (0.0, 1.0),
+    "cross_venue_volume_correlation": (-1.0, 1.0),
+    "cross_venue_timing_synchrony": (0.0, 1.0),
+    "cross_venue_net_flow": (0.0, 1.0),
+    "counterparty_venue_overlap": (0.0, 1.0),
+    "simultaneous_order_pair": (0.0, 1.0),
+    "cross_venue_cluster_score": (0.0, 1.0),
+    # Miscellaneous / optional features
+    "solana_linked_wash_score": (0.0, 100.0),
+    "temporal_kge_collab_score": (0.0, 1.0),
+    "bot_trust_line_latency": (0.0, float("inf")),
+    "bot_interval_regularity": (0.0, float("inf")),
+    "bot_op_entropy": (0.0, float("inf")),
+    "bridge_round_trip_ratio": (0.0, 1.0),
+}
+
+#: URL prefix used to build per-feature hyperlinks in SHAP output.
+#: Points to the feature dictionary inside the repository.
+FEATURE_DICT_BASE_URL: str = (
+    "https://github.com/Ledger-Lenz/Ledgerlens-data/blob/main/data/feature_dictionary.md"
+)
+
+#: Mapping from feature name to the markdown anchor in feature_dictionary.md.
+#: Used by shap_explainer.feature_dict_url() to build deep links.
+_FEATURE_ANCHORS: dict[str, str] = {
+    **{f"benford_chi_square_{h}h": "#11--benford_chi_square_hh" for h in [1, 4, 24, 168, 720]},
+    **{f"benford_mad_{h}h": "#12--benford_mad_hh" for h in [1, 4, 24, 168, 720]},
+    **{f"benford_z_max_{h}h": "#13--benford_z_max_hh" for h in [1, 4, 24, 168, 720]},
+    **{
+        f"benford_residual_chi_square_{h}h": "#14--benford_residual_chi_square_hh"
+        for h in [1, 4, 24, 168, 720]
+    },
+    **{f"benford_residual_mad_{h}h": "#15--benford_residual_mad_hh" for h in [1, 4, 24, 168, 720]},
+    "benford_ci_width": "#16--benford_ci_width",
+    "counterparty_concentration_ratio": "#21--counterparty_concentration_ratio",
+    "round_trip_frequency": "#22--round_trip_frequency",
+    "net_roundtrip_ratio": "#23--net_roundtrip_ratio",
+    "self_matching_rate": "#24--self_matching_rate",
+    "order_cancellation_rate": "#25--order_cancellation_rate",
+    "volume_per_counterparty_ratio": "#31--volume_per_counterparty_ratio",
+    "intra_minute_clustering": "#32--intra_minute_clustering",
+    "off_hours_activity_ratio": "#33--off_hours_activity_ratio",
+    "volume_spike_frequency": "#34--volume_spike_frequency",
+    "funding_source_similarity": "#41--funding_source_similarity",
+    "network_centrality": "#42--network_centrality",
+    "account_age_days": "#43--account_age_days",
+    "in_wash_trading_ring": "#44--in_wash_trading_ring",
+    "ring_size": "#45--ring_size",
+    "ring_internal_density": "#46--ring_internal_density",
+    "cross_pair_trade_synchrony": "#51--cross_pair_trade_synchrony",
+    "net_asset_flow_deviation": "#52--net_asset_flow_deviation",
+    "cross_pair_counterparty_overlap": "#53--cross_pair_counterparty_overlap",
+    "cross_pair_volume_correlation": "#54--cross_pair_volume_correlation",
+    "pair_diversity_score": "#55--pair_diversity_score",
+    "cross_pair_mad_std": "#56--cross_pair_mad_std",
+    "inter_arrival_cv": "#61--inter_arrival_cv",
+    "entropy_of_amounts": "#62--entropy_of_amounts",
+    "cross_wallet_volume_corr": "#63--cross_wallet_volume_corr",
+    "venue_trade_ratio": "#71--venue_trade_ratio",
+    "cross_venue_volume_correlation": "#72--cross_venue_volume_correlation",
+    "cross_venue_timing_synchrony": "#73--cross_venue_timing_synchrony",
+    "cross_venue_net_flow": "#74--cross_venue_net_flow",
+    "counterparty_venue_overlap": "#75--counterparty_venue_overlap",
+    "simultaneous_order_pair": "#76--simultaneous_order_pair",
+    "cross_venue_cluster_score": "#77--cross_venue_cluster_score",
+    "solana_linked_wash_score": "#91--solana_linked_wash_score",
+    "temporal_kge_collab_score": "#92--temporal_kge_collab_score",
+    "bot_trust_line_latency": "#93--bot_trust_line_latency",
+    "bot_interval_regularity": "#94--bot_interval_regularity",
+    "bot_op_entropy": "#95--bot_op_entropy",
+    "bridge_round_trip_ratio": "#96--bridge_round_trip_ratio",
+    **{f"gnn_{i}": "#81--gnn_0--gnn_31" for i in range(32)},
+}
+
+
+def feature_dict_url(feature_name: str) -> str | None:
+    """Return the full URL to the feature dictionary entry for *feature_name*.
+
+    Returns ``None`` if the feature is not listed in the dictionary (e.g. the
+    ``wallet`` identifier column or unknown features added after this release).
+
+    Example::
+
+        >>> feature_dict_url("benford_mad_24h")
+        'https://github.com/Ledger-Lenz/Ledgerlens-data/blob/main/data/feature_dictionary.md#12--benford_mad_hh'
+    """
+    anchor = _FEATURE_ANCHORS.get(feature_name)
+    if anchor is None:
+        return None
+    return f"{FEATURE_DICT_BASE_URL}{anchor}"
+
+
+def validate_feature_ranges(
+    feature_dict: dict[str, float],
+    *,
+    raise_on_violation: bool = False,
+) -> list[str]:
+    """Check each feature value in *feature_dict* against its documented range.
+
+    Compares every key in *feature_dict* that is present in ``FEATURE_RANGES``
+    against its ``[min, max]`` hard bounds. Out-of-range values are logged as
+    WARNING and returned as a list of human-readable violation strings.
+
+    NaN and inf values that fall outside a finite bound are also flagged.
+    Features not listed in ``FEATURE_RANGES`` (e.g. ``wallet``, GNN dimensions,
+    experimental features) are silently skipped.
+
+    Args:
+        feature_dict: A ``{feature_name: value}`` mapping for a single wallet.
+            Typically the output of ``build_feature_vector``.
+        raise_on_violation: When ``True``, raise ``ValueError`` listing all
+            violations instead of merely logging them. Defaults to ``False``
+            (log-only) so production scoring never hard-fails on range errors.
+
+    Returns:
+        List of violation strings, one per out-of-range feature. Empty list
+        means all checked features are within bounds.
+
+    Example::
+
+        warnings = validate_feature_ranges({"benford_mad_24h": 0.5, "account_age_days": -1.0})
+        # → ["account_age_days=-1.0 violates range [0.0, inf]"]
+    """
+    violations: list[str] = []
+
+    for feature, (lo, hi) in FEATURE_RANGES.items():
+        if feature not in feature_dict:
+            continue
+        raw = feature_dict[feature]
+        # Convert bool / int to float for comparison; skip non-numeric values
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if math.isnan(value):
+            # NaN is allowed (indicates missing data); skip range check
+            continue
+        out_of_range = False
+        if not math.isinf(lo) and value < lo:
+            out_of_range = True
+        if not math.isinf(hi) and value > hi:
+            out_of_range = True
+        if out_of_range:
+            msg = f"{feature}={value} violates range [{lo}, {hi}]"
+            violations.append(msg)
+            logger.warning("validate_feature_ranges: %s", msg)
+
+    if raise_on_violation and violations:
+        raise ValueError(
+            "Feature range violations detected:\n" + "\n".join(f"  {v}" for v in violations)
+        )
+
+    return violations

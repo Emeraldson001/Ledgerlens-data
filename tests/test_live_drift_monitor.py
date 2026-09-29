@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from detection.drift_monitor import LiveDriftMonitor, compute_psi
+from detection.drift_monitor import LiveDriftMonitor
 
 
 def _build_reference(values: np.ndarray, n_bins: int = 10) -> dict:
@@ -64,5 +64,3 @@ def test_live_drift_monitor_shifted_psi_above_0_2(tmp_path: Path):
         drifted = monitor.update(pd.Series({"feat_x": float(v)}))
 
     assert "feat_x" in drifted
-
-

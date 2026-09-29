@@ -12,7 +12,11 @@ from confluent_kafka import KafkaException
 
 from ingestion.avro_codec import deserialize, load_schema
 from ingestion.data_models import Asset, Trade
-from ingestion.kafka_producer import HorizonKafkaProducer
+from ingestion.kafka_producer import (
+    HorizonKafkaProducer,
+    ledgerlens_ingestion_trades_failed_total,
+    ledgerlens_ingestion_trades_produced_total,
+)
 
 USDC_ISSUER = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
 
@@ -120,3 +124,62 @@ def test_serialisation_failure_routes_to_dlq():
     assert envelope["reason"] == "bad field"
     assert envelope["raw"]["trade_id"] == "trade-001"
     assert ("reason", b"bad field") in kwargs["headers"]
+
+
+# ---------------------------------------------------------------------------
+# 4. Metrics incremented on success and failure
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    ledgerlens_ingestion_trades_produced_total is None, reason="prometheus_client not installed"
+)
+def test_metrics_incremented_on_produce():
+    producer, mock = _producer_with_mock()
+
+    before = ledgerlens_ingestion_trades_produced_total.labels(
+        topic=f"ledgerlens.trades.USDC_{USDC_ISSUER}_XLM_native"
+    )._value.get()
+    producer.produce_trade(make_trade())
+
+    # simulate on_delivery callback
+    from ingestion.kafka_producer import _on_delivery
+
+    mock_msg = MagicMock()
+    mock_msg.topic.return_value = f"ledgerlens.trades.USDC_{USDC_ISSUER}_XLM_native"
+    _on_delivery(None, mock_msg)
+
+    after = ledgerlens_ingestion_trades_produced_total.labels(
+        topic=f"ledgerlens.trades.USDC_{USDC_ISSUER}_XLM_native"
+    )._value.get()
+    assert after - before == 1
+
+
+@pytest.mark.skipif(
+    ledgerlens_ingestion_trades_failed_total is None, reason="prometheus_client not installed"
+)
+def test_metrics_incremented_on_failure():
+    producer, mock = _producer_with_mock()
+
+    before_serial = ledgerlens_ingestion_trades_failed_total.labels(
+        reason="serialisation_error"
+    )._value.get()
+    with patch("ingestion.kafka_producer.serialize", side_effect=ValueError("bad field")):
+        producer.produce_trade(make_trade())
+    after_serial = ledgerlens_ingestion_trades_failed_total.labels(
+        reason="serialisation_error"
+    )._value.get()
+    assert after_serial - before_serial == 1
+
+    before_delivery = ledgerlens_ingestion_trades_failed_total.labels(
+        reason="kafka_delivery_error"
+    )._value.get()
+    from ingestion.kafka_producer import _on_delivery
+
+    mock_msg = MagicMock()
+    mock_msg.topic.return_value = "some_topic"
+    _on_delivery(Exception("delivery failed"), mock_msg)
+    after_delivery = ledgerlens_ingestion_trades_failed_total.labels(
+        reason="kafka_delivery_error"
+    )._value.get()
+    assert after_delivery - before_delivery == 1

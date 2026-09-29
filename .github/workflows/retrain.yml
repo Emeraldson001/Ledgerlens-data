@@ -35,7 +35,9 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          # Keep formatting checks on the same interpreter as the main CI lint
+          # job; Black's safety parser is interpreter-dependent.
+          python-version: "3.12"
           cache: pip
 
       - name: Install dependencies

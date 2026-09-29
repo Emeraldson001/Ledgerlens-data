@@ -49,6 +49,17 @@ def test_hit_returns_cached_series_without_recompute():
     pd.testing.assert_series_equal(result, features)
 
 
+def test_schema_version_bump_invalidates_cached_rows():
+    cache = FeatureCache(ttl_seconds=300, maxsize=10, schema_version=1)
+    cache.put(WALLET_A, _series(42.0))
+
+    assert cache.get(WALLET_A) is not None
+
+    cache.schema_version = 2
+    assert cache.get(WALLET_A) is None
+    assert len(cache) == 0
+
+
 def test_put_overwrites_existing_entry():
     cache = FeatureCache(ttl_seconds=300, maxsize=10)
     cache.put(WALLET_A, _series(1.0))

@@ -1,0 +1,2 @@
+data/trade_avro_schema.json
+ingestion/kafka_producer.py

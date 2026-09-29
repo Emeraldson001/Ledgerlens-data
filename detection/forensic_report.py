@@ -12,6 +12,7 @@ Security invariants enforced here:
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import os
@@ -19,14 +20,25 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
 
+# CounterfactualResult is imported lazily to avoid circular imports;
+# we use TYPE_CHECKING for the type annotation only.
+from typing import TYPE_CHECKING, Literal
+
+import networkx as nx
 import pandas as pd
 
 from config import config
 from detection.causal_attribution import CounterfactualAttributor
+from detection.causal_forensic_report import (
+    CausalAttribution,
+    PropagationContributor,
+    PropagationPath,
+)
 from detection.model_inference import RiskScorer
-from detection.shap_explainer import ShapExplainer
+
+if TYPE_CHECKING:
+    from detection.counterfactual_explainer import CounterfactualResult
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -44,24 +56,23 @@ FEATURE_DESCRIPTIONS = {
     "self_matching_rate": "Fraction of trades that match buy/sell orders between wallets with shared funding sources.",
 }
 
+# CSV export columns (issue #97) — one row per SHAP feature, or a single
+# placeholder row (empty feature/value/contribution) when there are none.
+CSV_COLUMNS = ["wallet", "asset_pair", "risk_score", "feature", "shap_value", "shap_contribution"]
 
-def write_report_secure(out_path: str, content: str) -> None:
-    """Write content to out_path with mode 0o600, creating parent dirs if needed."""
+
+def write_csv_report(out_path: str, report: ForensicReport) -> None:
+    """Write *report* as a CSV (one row per SHAP feature) with mode 0o600."""
     parent = os.path.dirname(out_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    # Write using standard os open with mode 0o600
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    mode = 0o600
-    try:
-        fd = os.open(out_path, flags, mode)
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            f.write(content)
-    except Exception:
-        # Fallback to standard open but change mode afterwards
-        with open(out_path, 'w', encoding='utf-8') as f:
-            f.write(content)
-        os.chmod(out_path, mode)
+    fd = os.open(out_path, flags, 0o600)
+    with os.fdopen(fd, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+        writer.writeheader()
+        writer.writerows(report.to_csv_rows())
+    _apply_secure_mode(out_path)
 
 
 @dataclass
@@ -94,6 +105,7 @@ class ForensicReport:
     soroban_anchor_tx: str | None = field(default=None, init=False)
     causal_attribution: CausalAttribution | None = None
     propagation_path: PropagationPath | None = None
+    counterfactual_result: CounterfactualResult | None = None
 
     def __post_init__(self) -> None:
         self.report_sha256 = self._compute_sha256()
@@ -129,16 +141,49 @@ class ForensicReport:
             d["causal_attribution"] = asdict(self.causal_attribution)
         if self.propagation_path is not None:
             d["propagation_path"] = asdict(self.propagation_path)
+        if self.counterfactual_result is not None:
+            d["counterfactual_result"] = self.counterfactual_result.to_dict()
         return d
 
     def to_dict(self) -> dict:
+        from utils.version_stamp import stamp_artifact
+
         d = self._to_dict_without_hash()
         d["report_sha256"] = self.report_sha256
-        return d
+        return stamp_artifact(d, include_git=False)
 
     def verify_integrity(self) -> bool:
         """Recompute the SHA-256 and assert it matches the stored value."""
         return self._compute_sha256() == self.report_sha256
+
+    def to_csv_rows(self) -> list[dict]:
+        """One CSV row per SHAP feature (issue #97).
+
+        Emits a single placeholder row (empty feature/value/contribution)
+        when there are no SHAP explanations, so the CSV always has >= 1 row.
+        """
+        if not self.top_shap_features:
+            return [
+                {
+                    "wallet": self.wallet,
+                    "asset_pair": self.asset_pair,
+                    "risk_score": self.risk_score,
+                    "feature": "",
+                    "shap_value": "",
+                    "shap_contribution": "",
+                }
+            ]
+        return [
+            {
+                "wallet": self.wallet,
+                "asset_pair": self.asset_pair,
+                "risk_score": self.risk_score,
+                "feature": s.get("feature", ""),
+                "shap_value": s.get("value", ""),
+                "shap_contribution": s.get("contribution", ""),
+            }
+            for s in self.top_shap_features
+        ]
 
     def to_markdown(self) -> str:
         """Render the report as Markdown using the Jinja2 template."""
@@ -209,6 +254,7 @@ class ForensicReportGenerator:
         base_scores: dict[str, float] | None = None,
         co_trade_graph: nx.Graph | None = None,
         propagation_alpha: float = 0.15,
+        provenance: dict[str, list[str]] | None = None,
     ) -> ForensicReport:
         if risk_score_dict is None and feature_row is not None:
             risk_score_dict = self._scorer.score(feature_row)
@@ -226,7 +272,7 @@ class ForensicReportGenerator:
 
         benford_analysis = _build_benford_analysis(wallet_trades)
         trade_evidence = _select_anomalous_trades(wallet, wallet_trades, asset_pair)
-        enriched_shap = _enrich_shap(shap_values or [])
+        enriched_shap = _enrich_shap(shap_values or [], provenance=provenance)
 
         score_lower = max(0, score - 10)
         score_upper = min(100, score + 10)
@@ -347,18 +393,30 @@ def _select_anomalous_trades(
     return evidence
 
 
-def _enrich_shap(shap_values: list[dict]) -> list[dict]:
-    """Attach plain-English description to each SHAP entry."""
+def _enrich_shap(
+    shap_values: list[dict],
+    provenance: dict[str, list[str]] | None = None,
+) -> list[dict]:
+    """Attach plain-English description to each SHAP entry.
+
+    When *provenance* is provided (a feature_name → [trade_id, ...] mapping),
+    the top-5 entries also receive an ``evidence_links`` list of Horizon
+    explorer URLs, one per contributing trade ID.
+    """
     try:
         from detection.feature_engineering import FEATURE_DESCRIPTIONS
     except ImportError:
         FEATURE_DESCRIPTIONS = {}
 
     result = []
-    for entry in shap_values:
+    for i, entry in enumerate(shap_values):
         enriched = dict(entry)
         fname = entry.get("feature", "")
         enriched["description"] = FEATURE_DESCRIPTIONS.get(fname, fname)
+        if provenance is not None and i < 5:
+            trade_ids = provenance.get(fname, [])
+            horizon_base = config.HORIZON_URL.rstrip("/")
+            enriched["evidence_links"] = [f"{horizon_base}/trades/{tid}" for tid in trade_ids]
         result.append(enriched)
     return result
 
@@ -496,6 +554,20 @@ def _write_secure(path: str, content: str) -> None:
     fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(content)
+    _apply_secure_mode(str(p))
+
+
+def _apply_secure_mode(path: str) -> None:
+    """Attempt to apply 0o600 permissions; warn on platforms where it is a no-op."""
+    try:
+        os.chmod(path, 0o600)
+    except (OSError, NotImplementedError) as exc:
+        logger.warning(
+            "Could not set 0o600 permissions on %s: %s. "
+            "The permission guarantee does not apply on this platform.",
+            path,
+            exc,
+        )
 
 
 def write_report_secure(path: str, content: str) -> None:

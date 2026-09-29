@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import base64
-from datetime import datetime, UTC
+
 import networkx as nx
 import pytest
 
-from detection.cross_chain.behavioral_matcher import BehavioralMatcher, to_timestamp
+from detection.cross_chain.behavioral_matcher import BehavioralMatcher
 from detection.cross_chain.bridge_detector import BridgeDetector, bytes_to_base58
 from detection.cross_chain.identity_graph import IdentityGraph
 from detection.cross_chain.resolver import resolve, resolve_risk_scores
@@ -31,6 +31,7 @@ def session_factory(db_url):
 # ===========================================================================
 # 1. Identity Graph & Resolver Tests
 # ===========================================================================
+
 
 def test_identity_graph_nodes_and_edges(session_factory, db_url):
     graph = IdentityGraph(session_factory)
@@ -67,6 +68,7 @@ def test_identity_graph_nodes_and_edges(session_factory, db_url):
 # ===========================================================================
 # 2. Bridge Detector Tests
 # ===========================================================================
+
 
 def test_bridge_detector_memo_parsing():
     detector = BridgeDetector()
@@ -140,7 +142,7 @@ def test_bridge_detector_link_detection():
             "source_account": "GUSER3",
             "memo_type": "text",
             "memo": "hello world",
-        }
+        },
     ]
 
     links = detector.detect_bridge_links(txs)
@@ -159,20 +161,35 @@ def test_bridge_detector_link_detection():
 # 3. Behavioral Matcher Tests
 # ===========================================================================
 
+
 def test_behavioral_matcher_amount_fingerprint():
     stellar_txs = [
         {"wallet": "GUSER1", "timestamp": 1700000000, "amount": 100.0, "id": "s1"},
         {"wallet": "GUSER2", "timestamp": 1700000100, "amount": 250.0, "id": "s2"},
     ]
     external_txs = [
-        {"wallet": "0xETH1", "timestamp": 1700000010, "amount": 100.05, "chain": "ethereum", "id": "e1"},
-        {"wallet": "0xETH2", "timestamp": 1700000200, "amount": 250.0, "chain": "ethereum", "id": "e2"},
+        {
+            "wallet": "0xETH1",
+            "timestamp": 1700000010,
+            "amount": 100.05,
+            "chain": "ethereum",
+            "id": "e1",
+        },
+        {
+            "wallet": "0xETH2",
+            "timestamp": 1700000200,
+            "amount": 250.0,
+            "chain": "ethereum",
+            "id": "e2",
+        },
     ]
 
     # Matching with 0.1% tolerance and 60s window
     # s1 (100.0) and e1 (100.05): diff = 0.05 (0.05/100 = 0.0005 <= 0.001), dt = 10s <= 60s -> MATCH!
     # s2 (250.0) and e2 (250.0): diff = 0, dt = 100s > 60s -> NO MATCH!
-    links = BehavioralMatcher.match_amount_fingerprints(stellar_txs, external_txs, tolerance=0.001, window_seconds=60.0)
+    links = BehavioralMatcher.match_amount_fingerprints(
+        stellar_txs, external_txs, tolerance=0.001, window_seconds=60.0
+    )
     assert len(links) == 1
     assert links[0]["stellar_address"] == "GUSER1"
     assert links[0]["linked_address"] == "0xETH1"
@@ -204,10 +221,9 @@ def test_behavioral_matcher_timing_correlation():
             times_uncorrelated.append(hour_start + 1200.0)
 
     stellar_txs = [{"wallet": "GUSER1", "timestamp": t} for t in times_s]
-    external_txs = (
-        [{"wallet": "0xETH1", "timestamp": t, "chain": "ethereum"} for t in times_ext] +
-        [{"wallet": "0xETH2", "timestamp": t, "chain": "ethereum"} for t in times_uncorrelated]
-    )
+    external_txs = [
+        {"wallet": "0xETH1", "timestamp": t, "chain": "ethereum"} for t in times_ext
+    ] + [{"wallet": "0xETH2", "timestamp": t, "chain": "ethereum"} for t in times_uncorrelated]
 
     links = BehavioralMatcher.match_timing_correlation(
         stellar_txs, external_txs, bin_size_seconds=3600.0, min_common_bins=5, threshold=0.8
@@ -223,6 +239,7 @@ def test_behavioral_matcher_timing_correlation():
 # ===========================================================================
 # 4. Risk Propagation Integration Tests
 # ===========================================================================
+
 
 def test_risk_propagation_with_cross_chain(session_factory, db_url):
     # Initialize DB with cross-chain link
@@ -271,23 +288,38 @@ def test_risk_propagation_with_cross_chain(session_factory, db_url):
 # 5. False Positive Rate Test
 # ===========================================================================
 
+
 def test_false_positive_rate():
     # Build 100 mock pairs of activity records (50 true matches, 50 false matches)
     # Verify that the false positive rate is under 5% (i.e. <= 2 false matches)
     stellar_txs = []
     external_txs = []
-    
+
     # 50 True matches: identical/highly similar amounts & timing
     for i in range(50):
         time_s = 1700000000 + i * 1000
         stellar_txs.append({"wallet": f"GSTEL_{i}", "timestamp": time_s, "amount": 100.0 + i})
-        external_txs.append({"wallet": f"GEXT_{i}", "timestamp": time_s + 5, "amount": 100.0 + i, "chain": "ethereum"})
+        external_txs.append(
+            {
+                "wallet": f"GEXT_{i}",
+                "timestamp": time_s + 5,
+                "amount": 100.0 + i,
+                "chain": "ethereum",
+            }
+        )
 
     # 50 False matches: random amounts & timing
     for i in range(50, 100):
         time_s = 1700000000 + i * 1000
         stellar_txs.append({"wallet": f"GSTEL_{i}", "timestamp": time_s, "amount": 100.0 + i})
-        external_txs.append({"wallet": f"GEXT_{i}", "timestamp": time_s + 500, "amount": 999.0 - i, "chain": "ethereum"})
+        external_txs.append(
+            {
+                "wallet": f"GEXT_{i}",
+                "timestamp": time_s + 500,
+                "amount": 999.0 - i,
+                "chain": "ethereum",
+            }
+        )
 
     # Evaluate matchers
     detected_links = BehavioralMatcher.match_amount_fingerprints(

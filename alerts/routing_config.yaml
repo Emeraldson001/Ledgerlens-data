@@ -1,0 +1,48 @@
+# Configurable alert routing policy for detection outcomes.
+#
+# Consumed by alerts.router.AlertRouter.from_yaml(). Rules are evaluated
+# top-to-bottom; every matching rule's destinations are unioned unless a
+# rule sets `stop_on_match: true`, in which case it exclusively owns any
+# alert it matches and evaluation stops there. See docs/alerting.md and
+# docs/alert_routing.md for the full routing model.
+
+rules:
+  - name: critical-risk-pagerduty
+    min_risk_score: 90
+    stop_on_match: true
+    destinations:
+      - channel: pagerduty
+        target: "ledgerlens-critical"
+        severity_label: critical
+      - channel: webhook
+        target: "${AUDIT_WEBHOOK_URL}"
+        severity_label: critical
+
+  - name: consensus-escalated-slack
+    detectors: ["consensus_escalator"]
+    destinations:
+      - channel: slack
+        target: "#wash-trade-alerts"
+        severity_label: high
+
+  - name: bridge-anchor-pairs-compliance
+    asset_pair_patterns:
+      - "USDC:*/native"
+      - "native/USDC:*"
+    destinations:
+      - channel: webhook
+        target: "${COMPLIANCE_WEBHOOK_URL}"
+        severity_label: high
+
+  - name: tenant-acme-dedicated-channel
+    tenant: acme
+    destinations:
+      - channel: slack
+        target: "#acme-wash-trade-alerts"
+        severity_label: default
+
+# Used when no rule above matches at all.
+default_destinations:
+  - channel: webhook
+    target: "${ALERT_WEBHOOK_URL}"
+    severity_label: default

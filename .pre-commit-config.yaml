@@ -17,3 +17,19 @@ repos:
       - id: trailing-whitespace
       - id: check-yaml
       - id: check-toml
+
+  - repo: local
+    hooks:
+      - id: check-anonymization
+        name: Check Anonymization
+        entry: python scripts/check_anonymization.py
+        language: python
+        types_or: [json, csv, markdown, yaml, text]
+        pass_filenames: false
+
+      - id: check-import-cycles
+        name: Check Import Cycles
+        entry: python scripts/check_import_cycles.py --report-path .cache/import_cycle_report.json
+        language: python
+        types_or: [python]
+        pass_filenames: false

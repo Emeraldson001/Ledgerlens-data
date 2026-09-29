@@ -1,0 +1,749 @@
+name: Code Review Checklist — High-Risk Data Changes
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      # Feature / data schema
+      - "detection/feature_engineering.py"
+      - "data/feature_dictionary.md"
+      - "data/feature_ranges.json"
+      - "ingestion/data_models.py"
+      - "data/trade_avro_schema.json"
+      # Model training / inference
+      - "detection/model_training.py"
+      - "detection/model_inference.py"
+      - "detection/ensemble_calibrator.py"
+      - "detection/drift_monitor.py"
+      - "training/**"
+      # Privacy and security primitives
+      - "detection/differential_privacy.py"
+      - "detection/shap_explainer.py"
+      - "detection/privacy/**"
+      - "detection/adversarial/**"
+      - "detection/audit_trail.py"
+      - "utils/field_encryption.py"
+      # Persistence and on-chain integration
+      - "detection/persistence.py"
+      - "detection/risk_score_store.py"
+      - "integrations/contract_client.py"
+      - "integrations/**"
+      # Core config
+      - "config.py"
+      - ".env.example"
+      # Data assets
+      - "data/synthetic_dataset.parquet"
+      - "data/known_manipulation_events.csv"
+      - "models/**"
+
+  workflow_dispatch:
+
+jobs:
+  classify-changes:
+    name: Classify High-Risk Changes
+    runs-on: ubuntu-latest
+    outputs:
+      has_feature_changes: ${{ steps.classify.outputs.has_feature_changes }}
+      has_model_changes: ${{ steps.classify.outputs.has_model_changes }}
+      has_privacy_changes: ${{ steps.classify.outputs.has_privacy_changes }}
+      has_schema_changes: ${{ steps.classify.outputs.has_schema_changes }}
+      has_persistence_changes: ${{ steps.classify.outputs.has_persistence_changes }}
+      has_contract_changes: ${{ steps.classify.outputs.has_contract_changes }}
+      has_data_asset_changes: ${{ steps.classify.outputs.has_data_asset_changes }}
+      risk_level: ${{ steps.classify.outputs.risk_level }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed files by risk category
+        id: classify
+        run: |
+          python - <<'EOF'
+          import subprocess, re, os
+
+          result = subprocess.run(
+              ["git", "diff", "--name-only", f"origin/${{ github.base_ref }}", "HEAD"],
+              capture_output=True, text=True
+          )
+          changed = set(result.stdout.splitlines())
+
+          categories = {
+              "feature": re.compile(
+                  r"detection/feature_engineering\.py"
+                  r"|data/feature_dictionary\.md"
+                  r"|data/feature_ranges\.json"
+              ),
+              "model": re.compile(
+                  r"detection/model_(training|inference)\.py"
+                  r"|detection/ensemble_calibrator\.py"
+                  r"|detection/drift_monitor\.py"
+                  r"|training/"
+              ),
+              "privacy": re.compile(
+                  r"detection/(differential_privacy|shap_explainer|audit_trail)\.py"
+                  r"|detection/privacy/"
+                  r"|detection/adversarial/"
+                  r"|utils/field_encryption\.py"
+              ),
+              "schema": re.compile(
+                  r"ingestion/data_models\.py"
+                  r"|data/trade_avro_schema\.json"
+              ),
+              "persistence": re.compile(
+                  r"detection/(persistence|risk_score_store)\.py"
+              ),
+              "contract": re.compile(
+                  r"integrations/"
+              ),
+              "data_asset": re.compile(
+                  r"data/synthetic_dataset\.parquet"
+                  r"|data/known_manipulation_events\.csv"
+                  r"|models/"
+              ),
+          }
+
+          hits = {cat: any(pat.search(f) for f in changed) for cat, pat in categories.items()}
+
+          # Risk level: critical if privacy, schema, or contract touched
+          if hits["privacy"] or hits["schema"] or hits["contract"]:
+              risk = "critical"
+          elif hits["model"] or hits["persistence"] or hits["data_asset"]:
+              risk = "high"
+          elif hits["feature"]:
+              risk = "medium"
+          else:
+              risk = "low"
+
+          env_file = os.environ.get("GITHUB_OUTPUT", "/dev/stdout")
+          with open(env_file, "a") as f:
+              for cat, hit in hits.items():
+                  f.write(f"has_{cat}_changes={'true' if hit else 'false'}\n")
+              f.write(f"risk_level={risk}\n")
+
+          print(f"Risk level: {risk}")
+          print(f"Change categories: {[c for c, h in hits.items() if h]}")
+          EOF
+
+  feature-schema-checklist:
+    name: "Checklist — Feature Schema Changes"
+    runs-on: ubuntu-latest
+    needs: classify-changes
+    if: needs.classify-changes.outputs.has_feature_changes == 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Verify feature_schema_hash consistency
+        run: |
+          python - <<'EOF'
+          import re, sys, pathlib, hashlib, json
+
+          # Check if feature_engineering.py exports FEATURE_COLUMNS or similar
+          fe_src = pathlib.Path("detection/feature_engineering.py").read_text()
+          
+          # Look for FEATURE_COLUMNS constant or build_feature_matrix function
+          has_feature_list = (
+              "FEATURE_COLUMNS" in fe_src or
+              "build_feature_matrix" in fe_src or
+              "feature_columns" in fe_src.lower()
+          )
+          
+          if not has_feature_list:
+              print("⚠️  Could not find feature columns definition in feature_engineering.py")
+          else:
+              print("✅ Feature columns definition found in feature_engineering.py")
+
+          # Check if feature_dictionary.md was also updated
+          import subprocess
+          result = subprocess.run(
+              ["git", "diff", "--name-only", "origin/${{ github.base_ref }}", "HEAD"],
+              capture_output=True, text=True
+          )
+          changed = set(result.stdout.splitlines())
+          
+          fe_changed = "detection/feature_engineering.py" in changed
+          dict_changed = "data/feature_dictionary.md" in changed
+          
+          if fe_changed and not dict_changed:
+              print("⚠️  feature_engineering.py changed but data/feature_dictionary.md was not updated")
+              print("   Add new features to the feature dictionary with descriptions and value ranges")
+          elif fe_changed and dict_changed:
+              print("✅ Both feature_engineering.py and feature_dictionary.md updated together")
+          EOF
+
+      - name: Check for backward compatibility
+        run: |
+          python - <<'EOF'
+          import subprocess, re, sys
+
+          # Diff feature_engineering.py to detect removed or renamed features
+          result = subprocess.run(
+              ["git", "diff", f"origin/${{ github.base_ref }}", "HEAD",
+               "--", "detection/feature_engineering.py"],
+              capture_output=True, text=True
+          )
+          diff = result.stdout
+
+          # Look for removed feature column names (lines starting with -)
+          removed = re.findall(r'^-.*["\'](\w+_feature\w*|\w+_rate|\w+_score|\w+_ratio)["\']',
+                               diff, re.MULTILINE)
+          if removed:
+              print(f"⚠️  Potentially removed feature columns: {removed}")
+              print("   Removing features is a BREAKING CHANGE if models are trained on them.")
+              print("   Required actions:")
+              print("   1. Bump the version and update model_metadata.json feature_schema_hash")
+              print("   2. Retrain all three ensemble models")
+              print("   3. Update ledgerlens-core feature type definitions")
+              print("   4. Open linked PRs in ledgerlens-api and ledgerlens-dashboard")
+          else:
+              print("✅ No feature column removals detected")
+          EOF
+
+      - name: Verify feature_ranges.json updated for new features
+        run: |
+          python - <<'EOF'
+          import subprocess, json, pathlib, sys
+
+          result = subprocess.run(
+              ["git", "diff", "--name-only", "origin/${{ github.base_ref }}", "HEAD"],
+              capture_output=True, text=True
+          )
+          changed = set(result.stdout.splitlines())
+          
+          fe_changed = "detection/feature_engineering.py" in changed
+          ranges_changed = "data/feature_ranges.json" in changed
+          
+          ranges_path = pathlib.Path("data/feature_ranges.json")
+          if ranges_path.exists():
+              ranges = json.loads(ranges_path.read_text())
+              print(f"✅ feature_ranges.json tracks {len(ranges)} features")
+              if fe_changed and not ranges_changed:
+                  print("⚠️  feature_engineering.py changed but data/feature_ranges.json was not updated")
+                  print("   Run: python scripts/compute_feature_ranges.py")
+          else:
+              print("⚠️  data/feature_ranges.json not found")
+          EOF
+
+  model-change-checklist:
+    name: "Checklist — Model Training/Inference Changes"
+    runs-on: ubuntu-latest
+    needs: classify-changes
+    if: needs.classify-changes.outputs.has_model_changes == 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check model metadata is present and valid
+        run: |
+          python - <<'EOF'
+          import json, pathlib, sys
+
+          metrics_path = pathlib.Path("models/metrics.json")
+          if not metrics_path.exists():
+              print("⚠️  models/metrics.json not found — run model training to generate it")
+              sys.exit(0)
+
+          metrics = json.loads(metrics_path.read_text())
+          print("✅ models/metrics.json present")
+          
+          for key in ("models",):
+              if key not in metrics:
+                  print(f"⚠️  models/metrics.json missing '{key}'")
+          EOF
+
+      - name: Check verify_chain called after joblib.load
+        run: |
+          python - <<'EOF'
+          import re, pathlib, sys
+
+          issues = []
+          for f in pathlib.Path("detection").rglob("*.py"):
+              lines = f.read_text().splitlines()
+              for i, line in enumerate(lines):
+                  if re.search(r"joblib\.load\(", line):
+                      window = "\n".join(lines[i:i+6])
+                      if "verify_chain" not in window:
+                          issues.append(f"{f}:{i+1}: joblib.load without verify_chain")
+
+          if issues:
+              print("❌ Integrity check violations:")
+              for issue in issues:
+                  print(f"   {issue}")
+              sys.exit(1)
+          print("✅ All joblib.load calls followed by verify_chain")
+          EOF
+
+      - name: Check BFT voting is not bypassed
+        run: |
+          python - <<'EOF'
+          import re, pathlib, sys
+
+          inference_src = pathlib.Path("detection/model_inference.py").read_text()
+
+          # Ensure BFT-related constants/functions haven't been removed
+          bft_markers = [
+              "BFT_SCORE_DIVERGENCE_THRESHOLD",
+              "_combine_probabilities",
+          ]
+          missing = [m for m in bft_markers if m not in inference_src]
+          if missing:
+              print(f"⚠️  BFT markers removed from model_inference.py: {missing}")
+              print("   BFT voting prevents a single compromised model from dominating the score")
+          else:
+              print("✅ BFT voting markers present in model_inference.py")
+          EOF
+
+      - name: Validate ensemble calibrator Pareto front exists
+        run: |
+          python - <<'EOF'
+          import pathlib
+
+          pareto = pathlib.Path("models/pareto_front.json")
+          if pareto.exists():
+              print("✅ models/pareto_front.json exists (ensemble calibration done)")
+          else:
+              print("⚠️  models/pareto_front.json not found")
+              print("   Run: python -m detection.model_training --calibrate-ensemble")
+              print("   to calibrate ensemble weights before promoting to production")
+          EOF
+
+  privacy-security-checklist:
+    name: "Checklist — Privacy & Security Changes"
+    runs-on: ubuntu-latest
+    needs: classify-changes
+    if: needs.classify-changes.outputs.has_privacy_changes == 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check differential privacy parameters are within safe bounds
+        run: |
+          python - <<'EOF'
+          import re, pathlib, sys
+
+          # Scan config.py for DP parameters
+          config_src = pathlib.Path("config.py").read_text()
+
+          # Extract DP_EPSILON value
+          epsilon_match = re.search(r'DP_EPSILON\s*[=:]\s*([0-9.]+)', config_src)
+          delta_match = re.search(r'DP_DELTA\s*[=:]\s*([0-9e.+-]+)', config_src)
+
+          warnings = []
+          if epsilon_match:
+              epsilon = float(epsilon_match.group(1))
+              if epsilon > 2.0:
+                  warnings.append(
+                      f"DP_EPSILON={epsilon} is high (>2.0). "
+                      "Strong privacy requires ε ≤ 1.0."
+                  )
+              elif epsilon > 1.0:
+                  warnings.append(
+                      f"DP_EPSILON={epsilon} is above the standard 1.0 threshold. "
+                      "Consider whether this meets your privacy requirements."
+                  )
+              else:
+                  print(f"✅ DP_EPSILON={epsilon} is within safe bounds (≤1.0)")
+          else:
+              warnings.append("DP_EPSILON not found in config.py")
+
+          if delta_match:
+              delta = float(delta_match.group(1))
+              if delta > 1e-4:
+                  warnings.append(
+                      f"DP_DELTA={delta:.2e} is high (>1e-4). "
+                      "Standard practice requires δ ≤ 1/n where n is dataset size."
+                  )
+              else:
+                  print(f"✅ DP_DELTA={delta:.2e} is within safe bounds")
+
+          for w in warnings:
+              print(f"⚠️  {w}")
+          EOF
+
+      - name: Verify no DP noise skipped in public path
+        run: |
+          python - <<'EOF'
+          import re, pathlib, sys
+
+          shap_src = pathlib.Path("detection/shap_explainer.py").read_text()
+
+          # Ensure explain_private still applies noise by default
+          if "private=True" not in shap_src and "private = True" not in shap_src:
+              print("⚠️  explain_private default may have changed — verify private=True is the default")
+          else:
+              print("✅ DP noise applied by default (private=True)")
+
+          # Ensure audit mode is still logged
+          if "private=False" in shap_src or "audit" in shap_src.lower():
+              print("✅ Audit mode (private=False) still present")
+          else:
+              print("⚠️  Audit mode check: verify private=False path still exists and is logged")
+          EOF
+
+      - name: Check adversarial eval results are not regressed
+        run: |
+          python - <<'EOF'
+          import json, pathlib
+
+          adv_report = pathlib.Path("reports/adversarial_benchmark.json")
+          if adv_report.exists():
+              data = json.loads(adv_report.read_text())
+              print(f"✅ Adversarial benchmark report found: {adv_report}")
+              print(f"   Content keys: {list(data.keys())}")
+          else:
+              print("⚠️  reports/adversarial_benchmark.json not found")
+              print("   Run: python -m scripts.adversarial_eval")
+              print("   before merging adversarial module changes")
+          EOF
+
+      - name: Check field encryption key rotation is documented
+        run: |
+          python - <<'EOF'
+          import subprocess, re, sys
+
+          result = subprocess.run(
+              ["git", "diff", "origin/${{ github.base_ref }}", "HEAD",
+               "--", "utils/field_encryption.py"],
+              capture_output=True, text=True
+          )
+          diff = result.stdout
+          
+          if not diff:
+              print("✅ utils/field_encryption.py unchanged")
+              sys.exit(0)
+          
+          # Check if key rotation procedure is referenced
+          key_rotation_pattern = re.compile(
+              r"(key.?rotation|rotate.?key|reencrypt|re.?encrypt)", re.IGNORECASE
+          )
+          if not key_rotation_pattern.search(diff) and not key_rotation_pattern.search(
+              open("utils/field_encryption.py").read()
+          ):
+              print("⚠️  field_encryption.py changed — verify key rotation procedure is still valid")
+              print("   Document any encryption scheme changes in CHANGELOG.md")
+          else:
+              print("✅ Key rotation procedure referenced in encryption module")
+          EOF
+
+  data-asset-checklist:
+    name: "Checklist — Data Asset & Persistence Changes"
+    runs-on: ubuntu-latest
+    needs: classify-changes
+    if: >
+      needs.classify-changes.outputs.has_schema_changes == 'true' ||
+      needs.classify-changes.outputs.has_persistence_changes == 'true' ||
+      needs.classify-changes.outputs.has_data_asset_changes == 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check Avro schema evolution is backward compatible
+        run: |
+          python - <<'EOF'
+          import json, pathlib, subprocess, sys
+
+          avro_path = pathlib.Path("data/trade_avro_schema.json")
+          if not avro_path.exists():
+              print("⚠️  data/trade_avro_schema.json not found")
+              sys.exit(0)
+
+          result = subprocess.run(
+              ["git", "diff", "origin/${{ github.base_ref }}", "HEAD",
+               "--", "data/trade_avro_schema.json"],
+              capture_output=True, text=True
+          )
+          
+          if not result.stdout:
+              print("✅ data/trade_avro_schema.json unchanged")
+              sys.exit(0)
+
+          schema = json.loads(avro_path.read_text())
+          fields = {f["name"] for f in schema.get("fields", [])}
+          
+          # Check all fields have defaults (backward-compatible addition)
+          fields_without_defaults = [
+              f["name"] for f in schema.get("fields", [])
+              if "default" not in f
+          ]
+          
+          if fields_without_defaults:
+              print(f"⚠️  Avro schema fields without defaults (may break old consumers): "
+                    f"{fields_without_defaults}")
+              print("   Add null defaults for backward-compatible evolution")
+          else:
+              print(f"✅ All Avro schema fields have defaults ({len(fields)} fields)")
+          EOF
+
+      - name: Check SQLAlchemy migration script exists for schema changes
+        run: |
+          python - <<'EOF'
+          import subprocess, pathlib, sys
+
+          result = subprocess.run(
+              ["git", "diff", "--name-only", "origin/${{ github.base_ref }}", "HEAD"],
+              capture_output=True, text=True
+          )
+          changed = set(result.stdout.splitlines())
+          
+          persistence_changed = "detection/persistence.py" in changed
+          
+          if not persistence_changed:
+              print("✅ detection/persistence.py unchanged")
+              sys.exit(0)
+
+          # Check if a migration script was added alongside
+          migration_scripts = list(pathlib.Path("scripts").glob("migrate_*.py"))
+          migration_added = any(
+              "scripts/migrate_" in f for f in changed
+          )
+          
+          if migration_added:
+              print(f"✅ Migration script added alongside persistence.py change")
+          else:
+              print("⚠️  detection/persistence.py changed but no migration script found")
+              print("   If you added/removed columns, create scripts/migrate_<description>.py")
+              print("   Example: scripts/migrate_add_ring_id.py")
+          EOF
+
+      - name: Verify known_manipulation_events.csv is versioned
+        run: |
+          python - <<'EOF'
+          import subprocess, pathlib, sys
+
+          result = subprocess.run(
+              ["git", "diff", "--name-only", "origin/${{ github.base_ref }}", "HEAD"],
+              capture_output=True, text=True
+          )
+          changed = set(result.stdout.splitlines())
+
+          if "data/known_manipulation_events.csv" not in changed:
+              print("✅ known_manipulation_events.csv unchanged")
+              sys.exit(0)
+
+          csv_path = pathlib.Path("data/known_manipulation_events.csv")
+          import csv
+          with open(csv_path) as f:
+              reader = csv.DictReader(f)
+              events = list(reader)
+
+          print(f"✅ known_manipulation_events.csv updated: {len(events)} events")
+          
+          # Warn: backtest results may change
+          print("⚠️  Ground truth changed — backtest metrics will differ from baseline")
+          print("   Run: python -m scripts.backtest to update reports/backtest_*.json")
+          EOF
+
+  contract-integration-checklist:
+    name: "Checklist — Soroban Contract Integration Changes"
+    runs-on: ubuntu-latest
+    needs: classify-changes
+    if: needs.classify-changes.outputs.has_contract_changes == 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Verify RiskScore struct shape hasn't silently changed
+        run: |
+          python - <<'EOF'
+          import re, pathlib, subprocess, sys
+
+          result = subprocess.run(
+              ["git", "diff", "origin/${{ github.base_ref }}", "HEAD",
+               "--", "integrations/contract_client.py"],
+              capture_output=True, text=True
+          )
+          diff = result.stdout
+          if not diff:
+              print("✅ contract_client.py unchanged")
+              sys.exit(0)
+
+          # Check if the RiskScore fields are present in the diff
+          risk_score_fields = [
+              "score", "benford_flag", "ml_flag", "timestamp",
+              "confidence", "score_lower", "score_upper", "coverage_guarantee"
+          ]
+          
+          contract_src = pathlib.Path("integrations/contract_client.py").read_text()
+          missing_fields = [f for f in risk_score_fields if f not in contract_src]
+          
+          if missing_fields:
+              print(f"⚠️  RiskScore fields possibly missing from contract_client.py: {missing_fields}")
+              print("   The on-chain struct and the Python client must stay in sync")
+              print("   Cross-check with ledgerlens-contract's RiskScore definition")
+          else:
+              print("✅ All expected RiskScore fields present in contract_client.py")
+          EOF
+
+      - name: Check submit_score and get_score signatures
+        run: |
+          python - <<'EOF'
+          import re, pathlib, sys
+
+          contract_src = pathlib.Path("integrations/contract_client.py").read_text()
+          
+          for fn in ("submit_score", "get_score"):
+              if fn not in contract_src:
+                  print(f"❌ {fn} not found in contract_client.py")
+                  sys.exit(1)
+              print(f"✅ {fn} present in contract_client.py")
+          EOF
+
+      - name: Warn about testnet verification requirement
+        run: |
+          echo "⚠️  CONTRACT INTEGRATION CHANGE DETECTED"
+          echo ""
+          echo "Required before merge:"
+          echo "1. Verify integration against testnet:"
+          echo "   python -m scripts.testnet_setup"
+          echo "   python run_pipeline.py --submit-onchain --dry-run"
+          echo ""
+          echo "2. Confirm ledgerlens-contract ABI matches this client"
+          echo ""
+          echo "3. If RiskScore struct changed:"
+          echo "   - Open a linked PR in ledgerlens-contract"
+          echo "   - Update ledgerlens-core shared types"
+          echo "   - Notify ledgerlens-api and ledgerlens-dashboard teams"
+
+  generate-review-summary:
+    name: Generate Review Summary
+    runs-on: ubuntu-latest
+    needs:
+      - classify-changes
+      - feature-schema-checklist
+      - model-change-checklist
+      - privacy-security-checklist
+      - data-asset-checklist
+      - contract-integration-checklist
+    if: always()
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate review summary
+        run: |
+          python - <<'EOF'
+          import os
+
+          risk_level = "${{ needs.classify-changes.outputs.risk_level }}"
+          
+          has_feature = "${{ needs.classify-changes.outputs.has_feature_changes }}" == "true"
+          has_model = "${{ needs.classify-changes.outputs.has_model_changes }}" == "true"
+          has_privacy = "${{ needs.classify-changes.outputs.has_privacy_changes }}" == "true"
+          has_schema = "${{ needs.classify-changes.outputs.has_schema_changes }}" == "true"
+          has_persistence = "${{ needs.classify-changes.outputs.has_persistence_changes }}" == "true"
+          has_contract = "${{ needs.classify-changes.outputs.has_contract_changes }}" == "true"
+          has_data = "${{ needs.classify-changes.outputs.has_data_asset_changes }}" == "true"
+
+          risk_emoji = {
+              "critical": "🔴",
+              "high": "🟠", 
+              "medium": "🟡",
+              "low": "🟢",
+          }.get(risk_level, "⚪")
+
+          print(f"\n{'='*60}")
+          print(f"CODE REVIEW SUMMARY — {risk_emoji} {risk_level.upper()} RISK PR")
+          print(f"{'='*60}\n")
+          
+          active_checklists = []
+          if has_feature:
+              active_checklists.append("Feature Schema Changes")
+          if has_model:
+              active_checklists.append("Model Training/Inference")
+          if has_privacy:
+              active_checklists.append("Privacy & Security")
+          if has_schema or has_persistence or has_data:
+              active_checklists.append("Data Assets & Persistence")
+          if has_contract:
+              active_checklists.append("Soroban Contract Integration")
+
+          if active_checklists:
+              print("Checklists triggered:")
+              for c in active_checklists:
+                  print(f"  ✓ {c}")
+          else:
+              print("No high-risk categories detected in this diff.")
+
+          if risk_level in ("critical", "high"):
+              print(f"\n{risk_emoji} REQUIRED REVIEWERS for {risk_level.upper()} risk:")
+              if has_privacy:
+                  print("  - @Ledger-Lenz/security (privacy/adversarial changes)")
+              if has_contract:
+                  print("  - @Ledger-Lenz/contracts (Soroban integration changes)")
+              if has_model:
+                  print("  - @Ledger-Lenz/ml-core (model changes)")
+              if has_schema or has_data:
+                  print("  - @Ledger-Lenz/data-core (schema/data changes)")
+              print("\n  At least 2 reviewers required for critical risk PRs.")
+
+          print()
+          EOF
+
+      - name: Upload checklist results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-review-checklist-${{ github.run_number }}
+          path: |
+            .github/review_checklists/
+          if-no-files-found: ignore
+          retention-days: 90

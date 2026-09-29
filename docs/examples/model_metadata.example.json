@@ -1,0 +1,22 @@
+{
+  "model_name": "xgboost",
+  "ledgerlens_version": "0.2.0",
+  "training_date": "2026-08-28T00:00:00Z",
+  "dataset_version": "synthetic-v1",
+  "dataset_fingerprint": "8eab53ef6a55d699407767e637f74b6c63bc5ea73b628a4f60bc3a4c3f35ff32",
+  "hyperparameters": {
+    "n_estimators": 300,
+    "max_depth": 6,
+    "learning_rate": 0.05
+  },
+  "performance_metrics": {
+    "USDC:GA5Z.../XLM:native": {
+      "precision": 0.91,
+      "recall": 0.87,
+      "f1": 0.89
+    }
+  },
+  "known_limitations": "Trained on synthetic trade data only; has not been validated against real Stellar DEX activity. Cold-start pairs (fewer than 50 labelled trades) fall back to the Neural Process blend described in docs/cold_start.md.",
+  "intended_use": "Wash-trade risk scoring for Stellar DEX asset pairs, as an input to the LedgerLens ensemble scorer.",
+  "out_of_scope_uses": "Not intended for automated enforcement action or as sole evidence in a regulatory filing without human review."
+}

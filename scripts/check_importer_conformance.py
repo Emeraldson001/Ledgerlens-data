@@ -2,10 +2,12 @@
 
 import sys
 
-from ingestion import importer_registry, registered_importers  # noqa: F401
+from ingestion import registered_importers  # noqa: F401  (registers built-ins)
+from ingestion.importer_registry import get_registry
 
-failures = importer_registry.verify_all()
+registry = get_registry()
+failures = registry.verify_conformance()
 for f in failures:
     print("FAIL:", f)
-print(f"{len(importer_registry.registered())} importer(s) checked, {len(failures)} failure(s)")
+print(f"{len(registry.list_all())} importer(s) checked, {len(failures)} failure(s)")
 sys.exit(1 if failures else 0)

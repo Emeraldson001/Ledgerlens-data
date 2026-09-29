@@ -4,8 +4,8 @@ import pandas as pd
 import pytest
 
 from detection.causal_attribution import CounterfactualAttributor
-from detection.feature_engineering import build_feature_vector
 from detection.causal_forensic_report import CausalForensicReportGenerator
+from detection.feature_engineering import build_feature_vector
 from detection.wallet_graph import build_funding_graph
 from ingestion.data_models import AccountActivity
 from scripts.score_wallet import _parse_remove_trade_ids

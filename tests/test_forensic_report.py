@@ -321,3 +321,22 @@ def test_write_report_secure_creates_parent_dirs(tmp_path):
     write_report_secure(nested, "hello")
     assert os.path.exists(nested)
     assert stat.S_IMODE(os.stat(nested).st_mode) == 0o600
+
+
+def test_write_report_secure_warns_on_chmod_failure(tmp_path, caplog):
+    import detection.forensic_report as fr
+
+    original_chmod = os.chmod
+
+    def fake_chmod(path, mode):
+        raise OSError("not supported on this platform")
+
+    with patch.object(os, "chmod", side_effect=fake_chmod):
+        out_path = str(tmp_path / "report.json")
+        write_report_secure(out_path, "hello")
+        assert os.path.exists(out_path)
+        assert any(
+            "Could not set 0o600 permissions" in record.message for record in caplog.records
+        )
+
+    os.chmod = original_chmod

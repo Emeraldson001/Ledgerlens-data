@@ -1,0 +1,166 @@
+{
+  "version": 1,
+  "description": "LedgerLens test criticality taxonomy. Maps test file/node-id patterns to CRITICAL, HIGH, or LOW. CRITICAL and HIGH failures block the release gate; LOW is informational only. Patterns use fnmatch glob rules against the pytest node ID.",
+  "entries": [
+    {
+      "pattern": "tests/test_benford.py",
+      "criticality": "CRITICAL",
+      "reason": "Core Benford scoring path — chi-square, Z-score, MAD. Any failure here means risk scores are unreliable."
+    },
+    {
+      "pattern": "tests/test_benford_ci.py",
+      "criticality": "CRITICAL",
+      "reason": "Benford conformity interval tests — regression here breaks fraud detection thresholds."
+    },
+    {
+      "pattern": "tests/test_feature_engineering.py",
+      "criticality": "CRITICAL",
+      "reason": "Feature engineering produces the model input matrix. Silent errors here corrupt every downstream score."
+    },
+    {
+      "pattern": "tests/test_model_inference.py",
+      "criticality": "CRITICAL",
+      "reason": "BFT ensemble voting and RiskScorer — the final scoring output consumed by the API and Soroban contract."
+    },
+    {
+      "pattern": "tests/test_model_training.py",
+      "criticality": "CRITICAL",
+      "reason": "Model training pipeline — ensures trained artifacts are valid and reproducible."
+    },
+    {
+      "pattern": "tests/test_persistence.py",
+      "criticality": "CRITICAL",
+      "reason": "SQLAlchemy persistence layer — failures here mean scored wallets are not stored correctly."
+    },
+    {
+      "pattern": "tests/test_dry_run.py",
+      "criticality": "CRITICAL",
+      "reason": "Dry-run safety contract — --dry-run must never write to DB or on-chain."
+    },
+    {
+      "pattern": "tests/test_config.py",
+      "criticality": "CRITICAL",
+      "reason": "Config validation — bad config silently corrupts the pipeline at runtime."
+    },
+    {
+      "pattern": "tests/test_inference_shap.py",
+      "criticality": "HIGH",
+      "reason": "SHAP explainability — required for auditable scores but not on the direct scoring hot path."
+    },
+    {
+      "pattern": "tests/test_wallet_graph.py",
+      "criticality": "HIGH",
+      "reason": "Wallet graph features — funding-graph similarity and ring detection."
+    },
+    {
+      "pattern": "tests/test_wallet_graph_advanced.py",
+      "criticality": "HIGH",
+      "reason": "Advanced ring detection edge cases."
+    },
+    {
+      "pattern": "tests/test_drift_monitor.py",
+      "criticality": "HIGH",
+      "reason": "Feature drift detection — PSI-based retraining triggers."
+    },
+    {
+      "pattern": "tests/test_retrain_trigger.py",
+      "criticality": "HIGH",
+      "reason": "Automated retraining pipeline — promotion gate and exit codes."
+    },
+    {
+      "pattern": "tests/test_cross_venue_features.py",
+      "criticality": "HIGH",
+      "reason": "Cross-venue coordination features — SDEX + AMM wash-trade signal."
+    },
+    {
+      "pattern": "tests/test_cross_asset_features.py",
+      "criticality": "HIGH",
+      "reason": "Cross-asset coordination features."
+    },
+    {
+      "pattern": "tests/test_alert_dispatcher.py",
+      "criticality": "HIGH",
+      "reason": "Alert delivery — dedup and dispatch correctness."
+    },
+    {
+      "pattern": "tests/test_contract_client.py",
+      "criticality": "HIGH",
+      "reason": "Soroban contract client — on-chain score submission."
+    },
+    {
+      "pattern": "tests/test_adversarial.py",
+      "criticality": "HIGH",
+      "reason": "Adversarial robustness — FGSM/PGD evasion attack coverage."
+    },
+    {
+      "pattern": "tests/test_dp_shap.py",
+      "criticality": "HIGH",
+      "reason": "Differential-privacy SHAP — privacy budget enforcement."
+    },
+    {
+      "pattern": "tests/test_ensemble_calibrator.py",
+      "criticality": "HIGH",
+      "reason": "Ensemble calibration — NSGA-II Pareto front correctness."
+    },
+    {
+      "pattern": "tests/test_conformal.py",
+      "criticality": "HIGH",
+      "reason": "Conformal prediction intervals — uncertainty quantification."
+    },
+    {
+      "pattern": "tests/test_orderbook.py",
+      "criticality": "HIGH",
+      "reason": "Order-book event ingestion — cancellation rate feature."
+    },
+    {
+      "pattern": "tests/test_streaming_pipeline.py",
+      "criticality": "HIGH",
+      "reason": "Streaming pipeline backend routing."
+    },
+    {
+      "pattern": "tests/test_idempotency.py",
+      "criticality": "CRITICAL",
+      "reason": "Idempotency guarantees — double-writes corrupt the risk-score store."
+    },
+    {
+      "pattern": "tests/test_recovery.py",
+      "criticality": "CRITICAL",
+      "reason": "Partial-run recovery — failures here mean crashed pipelines corrupt data on restart."
+    },
+    {
+      "pattern": "tests/test_release_gate.py",
+      "criticality": "HIGH",
+      "reason": "Release gate itself — meta-test ensuring the gate logic is correct."
+    },
+    {
+      "pattern": "tests/test_quality_metrics.py",
+      "criticality": "HIGH",
+      "reason": "Engineering quality scorecard — ensures metric collection is accurate."
+    },
+    {
+      "pattern": "tests/test_backtest.py",
+      "criticality": "LOW",
+      "reason": "Historical backtesting — slow and data-dependent; informational only."
+    },
+    {
+      "pattern": "tests/test_federated.py",
+      "criticality": "LOW",
+      "reason": "Federated learning — experimental; not on the production scoring path."
+    },
+    {
+      "pattern": "tests/test_async_federated.py",
+      "criticality": "LOW",
+      "reason": "Async federated learning — experimental."
+    },
+    {
+      "pattern": "tests/test_gnn_encoder.py",
+      "criticality": "LOW",
+      "reason": "GNN encoder — embedding generation for future use."
+    },
+    {
+      "pattern": "tests/integration/*",
+      "criticality": "LOW",
+      "reason": "Live integration tests — require external services; not run in standard CI."
+    }
+  ]
+}

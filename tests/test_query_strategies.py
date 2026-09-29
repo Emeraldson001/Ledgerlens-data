@@ -72,6 +72,13 @@ def test_least_confidence_requires_model():
         LeastConfidence().select(_pool(3), n_query=2)
 
 
+def test_empty_pool_returns_empty_selection():
+    empty_pool = pd.DataFrame(columns=["wallet", "f1", "f2", "f3", "f4"])
+    assert LeastConfidence().select(empty_pool, n_query=3, model=FakeModel([0.5])) == []
+    assert Entropy().select(empty_pool, n_query=3, model=FakeModel([0.5])) == []
+    assert CoreSet().select(empty_pool, n_query=3) == []
+
+
 # ---------------------------------------------------------------------------
 # MarginSampling
 # ---------------------------------------------------------------------------
@@ -225,6 +232,7 @@ def test_strategy_registry_has_all_six():
         "coreset",
         "badge",
         "committee_disagreement",
+        "coreset_hybrid",
     }
     assert expected == set(STRATEGY_REGISTRY.keys())
 

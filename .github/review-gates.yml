@@ -1,0 +1,148 @@
+# Code review gates for PR approval
+# When a PR matches any rule's glob patterns, it requires the specified approval/label
+# This ensures high-risk code paths get dedicated review
+
+version: 1
+gates:
+  - name: "Database Schema & Migration Review"
+    description: "PRs touching database schema or migrations require explicit migration review"
+    required: true
+    paths:
+      - "migrations/**/*.py"
+      - "migrations/base.py"
+      - "migrations/runner.py"
+      - "detection/persistence.py"
+      - ".github/review-gates.yml"
+    checks:
+      - "Migration data-preservation test included"
+      - "Schema review completed"
+
+  - name: "Security & Threat Model Review"
+    description: "Changes to security controls or threat model need security review"
+    required: true
+    paths:
+      - "docs/security_threat_model.md"
+      - "docs/security.md"
+      - "scripts/release_gate.py"
+      - "config/environments/production.yaml"
+    checks:
+      - "Security audit completed"
+
+  - name: "Release Gate & CI Pipeline Review"
+    description: "Changes to CI/release automation need release engineer review"
+    required: true
+    paths:
+      - ".github/workflows/*.yml"
+      - "scripts/release_gate.py"
+      - "scripts/backup.py"
+      - "scripts/restore.py"
+    checks:
+      - "Pipeline impact assessed"
+      - "Gate logic verified"
+
+  - name: "Model & Detection Logic Review"
+    description: "Risk scoring and detection models need analysis team review"
+    required: true
+    paths:
+      - "detection/**/*.py"
+      - "models/**"
+      - "training/**/*.py"
+    checks:
+      - "Model validation completed"
+      - "Drift impact assessed"
+# Review gates for high-risk data and model changes.
+#
+# Single source of truth for which paths require a written acknowledgement in
+# the pull-request body. Read by `scripts/check_review_gates.py`, which runs in
+# `.github/workflows/review-gates.yml` and via `make check-review-gates`.
+#
+# A gate fires when a changed file matches one of its `paths` patterns. The PR
+# body must then contain a markdown heading matching the gate's `heading`,
+# followed by substantive prose (not a checkbox, not a placeholder).
+#
+# Patterns are fnmatch-style and are matched against the full repo-relative
+# path. `*` is not restricted to a single path segment.
+#
+# Deliberate exclusions — do not add these:
+#   * data/feature_ranges.json — generated statistics from
+#     scripts/compute_feature_ranges.py, read by nothing at runtime.
+#     FEATURE_RANGES is hardcoded in detection/feature_engineering.py.
+#   * models/*.joblib, models/*.pkl — gitignored, cannot appear in a diff.
+#   * reporting/schemas/model_metadata.json — already enforced at runtime by
+#     reporting/model_card_generator.py (MetadataValidationError).
+# These exclusions are asserted in tests/test_check_review_gates.py.
+
+version: 1
+
+# Minimum characters of prose required under a triggered heading.
+min_prose_chars: 20
+
+# A PR may bypass every gate with a line of the form:
+#   Review-Gate-Override: <reason>
+# The reason is subject to the same minimum length. Overrides remain visible in
+# the PR body and are echoed in the bot comment, so they are auditable.
+override_prefix: "Review-Gate-Override:"
+
+gates:
+  - id: kafka-wire-schema
+    heading: "Kafka wire schema"
+    paths:
+      - "data/trade_avro_schema.json"
+    prompt: >-
+      Describe the migration window. Mechanical backward/forward compatibility
+      is checked automatically by `make check-schema-compatibility`; state the
+      dual-write plan, which consumers were updated, and when the old field may
+      be removed.
+
+  - id: shared-contract
+    heading: "Shared contract"
+    paths:
+      - "ingestion/data_models.py"
+      - "detection/model_inference.py"
+    prompt: >-
+      These shapes are mirrored by `ledgerlens-core` and consumed by
+      `ledgerlens-api`, `ledgerlens-contract`, and `ledgerlens-dashboard`. Name
+      the fields that changed and link the downstream issues or PRs. If errors
+      are raised at an ingestion boundary, confirm they carry enough context to
+      triage (which source, which record, underlying cause) and follow the
+      module's existing error-handling convention.
+
+  - id: model-behaviour
+    heading: "Model behaviour"
+    paths:
+      - "detection/feature_engineering.py"
+      - "detection/model_training.py"
+    prompt: >-
+      Changing feature semantics or the training pipeline alters what the model
+      learns without necessarily failing a test. State whether models were
+      retrained, what evaluation was run, and how the metrics compare to the
+      previous baseline.
+
+  - id: database-schema
+    heading: "Database schema"
+    paths:
+      - "detection/persistence.py"
+      - "scripts/migrate_*.py"
+    prompt: >-
+      Covers SQLAlchemy table definitions and migration scripts, which act on
+      existing production data and are not trivially reversible. State the
+      migration path for databases already in the field and whether the change
+      is backward compatible. Model-artifact integrity is already enforced by
+      the `verify_chain` CI check — no need to restate it here.
+
+  - id: tenant-config
+    heading: "Tenant configuration"
+    paths:
+      - "config/tenants.yaml"
+    prompt: >-
+      Tenant entries govern isolation between customers. Confirm which tenants
+      are affected and that no tenant gained access to another's data.
+
+  - id: model-metadata
+    heading: "Model metadata"
+    paths:
+      - "models/metrics.json"
+    prompt: >-
+      This file carries signed model-artifact hashes and differential-privacy
+      parameters. State why it changed and whether the signature was
+      regenerated.

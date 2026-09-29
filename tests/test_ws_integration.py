@@ -181,9 +181,9 @@ async def test_valid_jwt_connects_successfully(ws_server):
     uri = f"ws://127.0.0.1:{port}"
     headers = {"Authorization": f"Bearer {token}"}
 
-    async with websockets.connect(uri, extra_headers=headers) as websocket:
+    async with websockets.connect(uri, additional_headers=headers) as websocket:
         # If we get here, connection was successful (HTTP 101)
-        assert websocket.open
+        assert websocket.state == websockets.State.OPEN
         # Send a ping to verify connection is working
         await websocket.ping()
 
@@ -198,12 +198,14 @@ async def test_expired_jwt_returns_401(ws_server):
     uri = f"ws://127.0.0.1:{port}"
     headers = {"Authorization": f"Bearer {token}"}
 
-    with pytest.raises(websockets.exceptions.InvalidStatusCode) as exc_info:
-        async with websockets.connect(uri, extra_headers=headers):
-            pass
+    # Server accepts the handshake then closes with 1008 (policy violation)
+    # rather than rejecting at the HTTP level, so the client sees the
+    # connection open successfully followed by a ConnectionClosedError.
+    async with websockets.connect(uri, additional_headers=headers) as websocket:
+        with pytest.raises(websockets.exceptions.ConnectionClosedError) as exc_info:
+            await websocket.recv()
 
-    # Should receive 1008 (policy violation) close code instead of HTTP 101
-    assert exc_info.value.status_code == 1008
+    assert exc_info.value.code == 1008
 
 
 @pytest.mark.asyncio
@@ -216,12 +218,11 @@ async def test_wrong_issuer_claim_rejected(ws_server):
     uri = f"ws://127.0.0.1:{port}"
     headers = {"Authorization": f"Bearer {token}"}
 
-    with pytest.raises(websockets.exceptions.InvalidStatusCode) as exc_info:
-        async with websockets.connect(uri, extra_headers=headers):
-            pass
+    async with websockets.connect(uri, additional_headers=headers) as websocket:
+        with pytest.raises(websockets.exceptions.ConnectionClosedError) as exc_info:
+            await websocket.recv()
 
-    # Should receive 1008 (policy violation) close code
-    assert exc_info.value.status_code == 1008
+    assert exc_info.value.code == 1008
 
 
 @pytest.mark.asyncio
@@ -234,12 +235,12 @@ async def test_missing_scores_read_scope_rejected(ws_server):
     uri = f"ws://127.0.0.1:{port}"
     headers = {"Authorization": f"Bearer {token}"}
 
-    with pytest.raises(websockets.exceptions.InvalidStatusCode) as exc_info:
-        async with websockets.connect(uri, extra_headers=headers):
-            pass
+    async with websockets.connect(uri, additional_headers=headers) as websocket:
+        with pytest.raises(websockets.exceptions.ConnectionClosedError) as exc_info:
+            await websocket.recv()
 
     # Should receive 1008 (policy violation) close code
-    assert exc_info.value.status_code == 1008
+    assert exc_info.value.code == 1008
 
 
 @pytest.mark.asyncio
@@ -254,7 +255,7 @@ async def test_subscribe_to_wallet_channel_successfully(ws_server):
     wallet_id = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"
     channel = f"wallet/{wallet_id}"
 
-    async with websockets.connect(uri, extra_headers=headers) as websocket:
+    async with websockets.connect(uri, additional_headers=headers) as websocket:
         # Send subscribe message
         subscribe_msg = {"type": "subscribe", "channels": [channel]}
         await websocket.send(json.dumps(subscribe_msg))
@@ -302,7 +303,7 @@ async def test_wallet_scoped_jwt_rejected_for_all_channel(ws_server):
     uri = f"ws://127.0.0.1:{port}"
     headers = {"Authorization": f"Bearer {token}"}
 
-    async with websockets.connect(uri, extra_headers=headers) as websocket:
+    async with websockets.connect(uri, additional_headers=headers) as websocket:
         # Try to subscribe to 'all' channel (should be rejected)
         subscribe_msg = {"type": "subscribe", "channels": ["all"]}
         await websocket.send(json.dumps(subscribe_msg))
@@ -337,7 +338,7 @@ async def test_rate_limit_error_after_threshold(ws_server):
     ws_module.config.WS_RATE_LIMIT_MSGS_PER_SECOND = 5  # 5 messages per second
 
     try:
-        async with websockets.connect(uri, extra_headers=headers) as websocket:
+        async with websockets.connect(uri, additional_headers=headers) as websocket:
             # Subscribe to channel
             subscribe_msg = {"type": "subscribe", "channels": [channel]}
             await websocket.send(json.dumps(subscribe_msg))
@@ -393,11 +394,11 @@ async def test_connection_without_token_rejected(ws_server):
     port, _, _ = ws_server
     uri = f"ws://127.0.0.1:{port}"
 
-    with pytest.raises(websockets.exceptions.InvalidStatusCode) as exc_info:
-        async with websockets.connect(uri):
-            pass
+    async with websockets.connect(uri) as websocket:
+        with pytest.raises(websockets.exceptions.ConnectionClosedError) as exc_info:
+            await websocket.recv()
 
-    assert exc_info.value.status_code == 1008
+    assert exc_info.value.code == 1008
 
 
 @pytest.mark.asyncio
@@ -409,7 +410,7 @@ async def test_invalid_channel_format_rejected(ws_server):
     uri = f"ws://127.0.0.1:{port}"
     headers = {"Authorization": f"Bearer {token}"}
 
-    async with websockets.connect(uri, extra_headers=headers) as websocket:
+    async with websockets.connect(uri, additional_headers=headers) as websocket:
         # Try to subscribe to invalid channel
         subscribe_msg = {"type": "subscribe", "channels": ["invalid-channel-format"]}
         await websocket.send(json.dumps(subscribe_msg))
@@ -422,3 +423,89 @@ async def test_invalid_channel_format_rejected(ws_server):
             assert message["code"] == "invalid_channel"
         except TimeoutError:
             pytest.fail("Did not receive invalid_channel error message")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Zombie connection (abrupt disconnect) cleanup test
+# ─────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_zombie_connection_cleaned_up_after_heartbeat(ws_server):
+    """A client that disconnects without a close handshake must be removed from
+    the server's _clients dict within one heartbeat cycle.
+
+    This test:
+    1. Connects a legitimate client and confirms it appears in _clients.
+    2. Closes the underlying TCP transport without sending a WebSocket close
+       frame (simulating a network drop / browser tab kill).
+    3. Triggers a broadcast (which exercises the send path) and waits for the
+       server's write-failure detection to clean up the dead entry.
+    4. Asserts the dead client ID is no longer in _clients within a generous
+       timeout.
+    """
+    port, private_key, _ = ws_server
+    zombie_client_id = "zombie-test-client"
+    token = create_test_jwt(private_key, client_id=zombie_client_id)
+
+    uri = f"ws://127.0.0.1:{port}"
+    headers = {"Authorization": f"Bearer {token}"}
+
+    from streaming import ws_server as ws_module
+
+    # ── Step 1: Connect and confirm the client is registered ──────────────
+    websocket = await websockets.connect(uri, additional_headers=headers)
+    # Give the server's _handler coroutine time to register the client
+    await asyncio.sleep(0.3)
+
+    with ws_module._clients_lock:
+        assert (
+            zombie_client_id in ws_module._clients
+        ), "Client should be registered in _clients after connecting"
+
+    # Subscribe to a channel so the client is eligible to receive broadcasts
+    channel = "wallet/GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"
+    await websocket.send(json.dumps({"type": "subscribe", "channels": [channel]}))
+    await asyncio.sleep(0.1)
+
+    # ── Step 2: Abrupt disconnect — close the transport without WS close ──
+    # websockets.WebSocketClientProtocol exposes the underlying asyncio
+    # transport; closing it abruptly mimics a network drop.
+    websocket.transport.close()
+
+    # ── Step 3: Trigger a broadcast so the server attempts a send to the
+    #            dead socket and detects the failure ─────────────────────
+    if ws_module._loop and ws_module._loop.is_running():
+        score_event = {
+            "wallet": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+            "asset_pair": "XLM:native/USDC:test",
+            "score": 80,
+            "score_lower": 75,
+            "score_upper": 85,
+            "bft_divergence": False,
+            "top_features": [],
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+        asyncio.run_coroutine_threadsafe(
+            ws_module.publish_score_update(score_event), ws_module._loop
+        )
+
+    # ── Step 4: Wait for cleanup and assert ───────────────────────────────
+    # The server detects the dead connection either through the write failure
+    # in _process_outbound or through the heartbeat ping.  We use a generous
+    # 5-second timeout which is well within one heartbeat cycle even on slow CI.
+    deadline = asyncio.get_event_loop().time() + 5.0
+    while asyncio.get_event_loop().time() < deadline:
+        await asyncio.sleep(0.1)
+        with ws_module._clients_lock:
+            if zombie_client_id not in ws_module._clients:
+                break
+    else:
+        with ws_module._clients_lock:
+            still_present = zombie_client_id in ws_module._clients
+        if still_present:
+            pytest.fail(
+                f"Zombie client '{zombie_client_id}' was NOT removed from _clients "
+                "within 5 seconds of an abrupt transport close. The server is leaking "
+                "dead connections."
+            )

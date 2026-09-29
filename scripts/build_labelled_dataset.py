@@ -29,7 +29,6 @@ import json
 from pathlib import Path
 
 import networkx as nx
-import numpy as np
 import pandas as pd
 
 from detection.feature_engineering import build_feature_matrix

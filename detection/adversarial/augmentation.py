@@ -107,7 +107,10 @@ def evaluate_augmentation(
     # 1. Baseline ensemble on clean data.
     baseline_results = train_models(train_df, test_size=test_size, random_state=random_state)
     baseline_dir = _persist(baseline_results, model_dir, suffix="baseline")
-    baseline_scorer = RiskScorer(model_dir=baseline_dir)
+    # require_trust_chain=False: baseline_dir holds a disposable model
+    # trained moments ago purely for this evaluation, never published or
+    # served — see RiskScorer.__init__ docstring.
+    baseline_scorer = RiskScorer(model_dir=baseline_dir, require_trust_chain=False)
 
     # 2. Adversarial test set built against the baseline scorer.
     adv_test = generate_adversarial_examples(
@@ -136,7 +139,8 @@ def evaluate_augmentation(
         augmented_train, test_size=test_size, random_state=random_state
     )
     augmented_dir = _persist(augmented_results, model_dir, suffix="augmented")
-    augmented_scorer = RiskScorer(model_dir=augmented_dir)
+    # require_trust_chain=False: same as baseline_scorer above.
+    augmented_scorer = RiskScorer(model_dir=augmented_dir, require_trust_chain=False)
 
     augmented_auc = _auc_on_adversarial_set(augmented_scorer, adv_eval_set)
 

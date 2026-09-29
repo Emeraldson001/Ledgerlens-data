@@ -1,9 +1,11 @@
 import pandas as pd
+import pytest
 
 from detection.feature_engineering import (
     compute_order_cancellation_rate,
     compute_trade_pattern_features,
 )
+from ingestion.exceptions import RecordValidationError
 from ingestion.orderbook_loader import _action_for_operation, _to_orderbook_event
 
 
@@ -64,6 +66,32 @@ def test_to_orderbook_event_returns_none_for_noop():
     assert _to_orderbook_event(record) is None
 
 
+def test_to_orderbook_event_raises_typed_error_on_missing_field():
+    record = sample_operation_record()
+    del record["source_account"]
+
+    with pytest.raises(RecordValidationError) as excinfo:
+        _to_orderbook_event(record)
+
+    assert excinfo.value.source == "orderbook_loader._to_orderbook_event"
+    assert excinfo.value.raw is not None
+
+
+def test_to_orderbook_event_raises_typed_error_on_missing_type():
+    record = sample_operation_record()
+    del record["type"]
+
+    with pytest.raises(RecordValidationError):
+        _to_orderbook_event(record)
+
+
+def test_to_orderbook_event_raises_typed_error_on_bad_amount():
+    record = sample_operation_record(amount="not-a-number")
+
+    with pytest.raises(RecordValidationError):
+        _to_orderbook_event(record)
+
+
 def orderbook_events_df() -> pd.DataFrame:
     return pd.DataFrame(
         [
@@ -84,6 +112,33 @@ def test_compute_order_cancellation_rate():
 
 def test_compute_order_cancellation_rate_handles_none():
     assert compute_order_cancellation_rate("A", None) == 0.0
+
+
+def orderbook_events_partial_fill_then_cancel() -> pd.DataFrame:
+    """Event stream for an offer that was partially filled, then cancelled.
+
+    A wallet places a 100-unit offer and 60 units are filled via the trade
+    stream, which produces no manage-offer operation. The remaining 40 units
+    are then cancelled in a single ``cancelled`` operation. The loader
+    cannot see the fill, so the `amount` column (100 offered, 40 remainder)
+    is the only trace that the order was partially filled before being
+    cancelled.
+    """
+    return pd.DataFrame(
+        [
+            {"event_id": "1", "account": "A", "action": "created", "amount": 100.0},
+            {"event_id": "2", "account": "A", "action": "cancelled", "amount": 40.0},
+        ]
+    )
+
+
+def test_compute_order_cancellation_rate_partial_fill_then_cancel_remainder():
+    """A partial fill followed by cancellation of the remainder counts as a
+    single cancellation: 1 cancelled manage-offer operation out of 2.
+    Fills are not manage-offer operations, so this is indistinguishable from
+    (and counted identically to) a pure cancellation."""
+    events = orderbook_events_partial_fill_then_cancel()
+    assert compute_order_cancellation_rate("A", events) == 1 / 2
 
 
 def test_compute_trade_pattern_features_includes_cancellation_rate():

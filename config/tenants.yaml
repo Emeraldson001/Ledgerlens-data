@@ -1,0 +1,21 @@
+tenants:
+  exchange_a:
+    risk_threshold: 70
+    threshold_strategy: static
+    threshold_config: {}
+    benford_min_sample: 100
+    alert_channels:
+      - stdout
+    asset_pair_whitelist:
+      - USDC:GA5ZSEJYBY3RJRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN
+  exchange_b:
+    risk_threshold: 75
+    threshold_strategy: statistical
+    threshold_config:
+      recall_floor: 0.85
+      target_metric: f1
+    benford_min_sample: 50
+    alert_channels:
+      - webhook
+    asset_pair_whitelist:
+      - USDC:GA5ZSEJYBY3RJRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN

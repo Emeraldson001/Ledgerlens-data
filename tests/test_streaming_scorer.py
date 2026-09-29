@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from detection.feature_cache import FeatureCache
 from ingestion.data_models import Asset, Trade
 from scripts.generate_synthetic_dataset import generate_synthetic_dataset
 from streaming.feature_buffer import FeatureBuffer
@@ -97,7 +98,9 @@ def test_score_wallet_returns_none_on_scorer_exception():
 
     scorer = StreamingScorer.__new__(StreamingScorer)
     scorer.min_trades = 20
+    scorer._feature_cache = FeatureCache()
     mock_risk_scorer = MagicMock()
+    mock_risk_scorer.calibrators = {}
     mock_risk_scorer.score.side_effect = RuntimeError("model error")
     scorer._risk_scorer = mock_risk_scorer
 
@@ -128,6 +131,10 @@ def test_score_wallet_returns_risk_score_dict(trained_scorer):
     assert 0 <= result["score"] <= 100
     assert isinstance(result["benford_flag"], bool)
     assert isinstance(result["ml_flag"], bool)
+    # Uncertainty fields may be present when calibration is loaded
+    if "score_lower" in result:
+        assert "score_upper" in result
+        assert "coverage_guarantee" in result
 
 
 # ---------------------------------------------------------------------------

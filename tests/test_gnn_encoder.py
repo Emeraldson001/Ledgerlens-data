@@ -16,6 +16,8 @@ installed (CI environments without GPU/torch can still run all other tests).
 
 from __future__ import annotations
 
+import logging
+import logging.handlers
 import os
 
 import networkx as nx
@@ -382,6 +384,13 @@ class TestGNNEncoderPersistence:
 class TestGNNGracefulFallback:
     """compute_graph_embedding_features must return zeros when encoder is absent."""
 
+    def setup_method(self):
+        """Reset the one-time warning sentinel before each test so tests are
+        independent of execution order."""
+        import detection.feature_engineering as fe
+
+        fe._gnn_zero_fallback_warned = False
+
     def test_build_feature_vector_gnn_absent(self):
         """When gnn_encoder=None, gnn_0…gnn_31 must all be 0.0."""
         from detection.feature_engineering import build_feature_vector
@@ -404,6 +413,122 @@ class TestGNNGracefulFallback:
         row = build_feature_vector(wallet, trades, gnn_encoder=None)
         for i in range(config.GNN_EMBEDDING_DIM):
             assert row[f"gnn_{i}"] == 0.0, f"gnn_{i} must be 0.0 when encoder is absent"
+
+    def test_zero_fallback_emits_warning_once(self):
+        """The zero-fallback path must emit exactly one WARNING per pipeline run,
+        not one per wallet (which would spam the log)."""
+        import logging
+
+        import detection.feature_engineering as fe
+
+        fe._gnn_zero_fallback_warned = False  # ensure clean state
+
+        from detection.feature_engineering import build_feature_vector
+
+        trades = pd.DataFrame(
+            [
+                {
+                    "trade_id": str(i),
+                    "ledger_close_time": "2024-01-01T00:00:00Z",
+                    "base_account": W_A,
+                    "counter_account": W_B,
+                    "base_asset": "USDC:issuer",
+                    "counter_asset": "XLM:native",
+                    "amount": float(100 + i),
+                    "price": 0.1,
+                }
+                for i in range(3)
+            ]
+        )
+
+        with pytest.warns(None):  # not using pytest.warns — use logging capture
+            pass
+
+        # Capture WARNING records on the feature_engineering logger
+        log_records: list[logging.LogRecord] = []
+        handler = logging.handlers.MemoryHandler(capacity=100, flushLevel=logging.CRITICAL)
+        handler.buffer = log_records  # type: ignore[assignment]
+
+        fe_logger = logging.getLogger("detection.feature_engineering")
+        fe_logger.addHandler(handler)
+        fe_logger.setLevel(logging.DEBUG)
+
+        try:
+            # Call build_feature_vector three times (simulating three wallets)
+            for wallet in [W_A, W_B, W_C]:
+                build_feature_vector(wallet, trades, gnn_encoder=None)
+        finally:
+            fe_logger.removeHandler(handler)
+
+        warning_records = [
+            r
+            for r in log_records
+            if r.levelno == logging.WARNING and "gnn" in r.getMessage().lower()
+        ]
+        assert len(warning_records) == 1, (
+            f"Expected exactly 1 GNN zero-fallback WARNING across 3 wallet calls, "
+            f"got {len(warning_records)}. "
+            "The warning fires per-wallet (log spam) or not at all."
+        )
+        assert "gnn" in warning_records[0].getMessage().lower()
+
+    def test_no_warning_when_encoder_provided(self):
+        """When a real encoder is supplied, the zero-fallback warning must NOT fire."""
+        import logging
+
+        import detection.feature_engineering as fe
+
+        fe._gnn_zero_fallback_warned = False
+
+        # We only need to check that the warning doesn't fire; we don't need
+        # torch for this — use a mock encoder that raises so we fall through
+        # to compute_graph_embedding_features's internal exception handler
+        # (which returns zeros silently) rather than the outer else branch.
+        class _MockEncoder:
+            def encode(self, graph, wallet):
+                return [0.0] * config.GNN_EMBEDDING_DIM
+
+        from detection.feature_engineering import build_feature_vector
+
+        trades = pd.DataFrame(
+            [
+                {
+                    "trade_id": "1",
+                    "ledger_close_time": "2024-01-01T00:00:00Z",
+                    "base_account": W_A,
+                    "counter_account": W_B,
+                    "base_asset": "USDC:issuer",
+                    "counter_asset": "XLM:native",
+                    "amount": 100.0,
+                    "price": 0.1,
+                }
+            ]
+        )
+        graph = _small_graph()
+
+        log_records: list[logging.LogRecord] = []
+        handler = logging.handlers.MemoryHandler(capacity=100, flushLevel=logging.CRITICAL)
+        handler.buffer = log_records  # type: ignore[assignment]
+
+        fe_logger = logging.getLogger("detection.feature_engineering")
+        fe_logger.addHandler(handler)
+        fe_logger.setLevel(logging.DEBUG)
+
+        try:
+            build_feature_vector(W_A, trades, funding_graph=graph, gnn_encoder=_MockEncoder())
+        finally:
+            fe_logger.removeHandler(handler)
+
+        gnn_warnings = [
+            r
+            for r in log_records
+            if r.levelno == logging.WARNING
+            and "gnn" in r.getMessage().lower()
+            and "zero" in r.getMessage().lower()
+        ]
+        assert (
+            len(gnn_warnings) == 0
+        ), "GNN zero-fallback WARNING should NOT fire when an encoder is provided."
 
     @requires_torch
     def test_build_feature_vector_gnn_present(self):

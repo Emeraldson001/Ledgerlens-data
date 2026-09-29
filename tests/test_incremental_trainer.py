@@ -170,3 +170,34 @@ def test_update_raises_without_models(tmp_path, monkeypatch):
     df = generate_synthetic_dataset(n_wallets=10, seed=1)
     with pytest.raises(RuntimeError, match="No trained models"):
         trainer.update(df)
+
+
+# ---------------------------------------------------------------------------
+# AL_ROLLBACK_AUC_DROP validation (Issue #738)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("negative_value", [-0.01, -1.0, -0.0001])
+def test_rollback_threshold_rejects_negative(tmp_path, monkeypatch, negative_value):
+    monkeypatch.setattr("config.config.AL_ROLLBACK_AUC_DROP", negative_value)
+    with pytest.raises(ValueError, match="AL_ROLLBACK_AUC_DROP must be non-negative"):
+        IncrementalTrainer(model_dir=str(tmp_path / "models"))
+
+
+@pytest.mark.parametrize("value", [0.0, 0.01, 0.1, 0.2])
+def test_rollback_threshold_accepts_documented_range_silently(tmp_path, monkeypatch, caplog, value):
+    monkeypatch.setattr("config.config.AL_ROLLBACK_AUC_DROP", value)
+    with caplog.at_level("WARNING"):
+        IncrementalTrainer(model_dir=str(tmp_path / "models"))
+    assert "outside the documented reasonable range" not in caplog.text
+
+
+@pytest.mark.parametrize("out_of_band_value", [0.21, 1.0, 0.5])
+def test_rollback_threshold_warns_without_blocking_outside_documented_range(
+    tmp_path, monkeypatch, caplog, out_of_band_value
+):
+    monkeypatch.setattr("config.config.AL_ROLLBACK_AUC_DROP", out_of_band_value)
+    with caplog.at_level("WARNING"):
+        trainer = IncrementalTrainer(model_dir=str(tmp_path / "models"))
+    assert "outside the documented reasonable range" in caplog.text
+    assert trainer.model_dir == str(tmp_path / "models")

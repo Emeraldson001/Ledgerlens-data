@@ -28,9 +28,13 @@ def _account_created_record(account: str, funder: str, created_at: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
+_VALID_ACCOUNT = "GCMRDJQF346SWQTEKUM2EG2MDNLRXUIHT36WQXYULQFPQOZJKADJUFOL"
+_VALID_FUNDER = "GBKP2C64A54567BNXBXIT5NJNYVEY3SS7XH7UAFTGOWDRC3URIND4W7O"
+
+
 @patch("ingestion.account_activity_loader.Server")
 def test_load_account_activity_returns_model(mock_server_cls):
-    record = _account_created_record("GABC", "GFUNDER", "2024-01-15T10:30:00Z")
+    record = _account_created_record(_VALID_ACCOUNT, _VALID_FUNDER, "2024-01-15T10:30:00Z")
     page = _make_effect_page([record])
 
     mock_call_builder = MagicMock()
@@ -43,12 +47,12 @@ def test_load_account_activity_returns_model(mock_server_cls):
     mock_server.effects.return_value = mock_call_builder
     mock_server_cls.return_value = mock_server
 
-    result = load_account_activity("GABC")
+    result = load_account_activity(_VALID_ACCOUNT)
 
     assert result is not None
     assert isinstance(result, AccountActivity)
-    assert result.account_id == "GABC"
-    assert result.funding_account == "GFUNDER"
+    assert result.account_id == _VALID_ACCOUNT
+    assert result.funding_account == _VALID_FUNDER
     assert result.account_created_at.year == 2024
 
 

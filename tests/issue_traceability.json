@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "work_items": [
+    {
+      "id": "ADV-001",
+      "title": "Build structured log correlation across pipeline stages",
+      "tier": "advanced",
+      "tests": [
+        "tests/test_ingestion_observability.py::test_log_context_is_nested_and_transportable"
+      ]
+    },
+    {
+      "id": "ADV-002",
+      "title": "Build metrics emitters for ingestion throughput and failures",
+      "tier": "advanced",
+      "tests": [
+        "tests/test_ingestion_observability.py::test_ingestion_metrics_emit_throughput_and_typed_failures"
+      ]
+    },
+    {
+      "id": "ADV-003",
+      "title": "Build typed exceptions for ingestion and validation failures",
+      "tier": "advanced",
+      "tests": [
+        "tests/test_ingestion_observability.py::test_ingestion_exceptions_are_machine_readable"
+      ]
+    },
+    {
+      "id": "ADV-004",
+      "title": "Build issue-to-test traceability for advanced work items",
+      "tier": "advanced",
+      "tests": [
+        "tests/test_issue_traceability.py::test_advanced_work_item_traceability_is_complete"
+      ]
+    },
+    {
+      "id": "481",
+      "title": "Build privacy threat-model tests for sensitive ledger attributes",
+      "tier": "advanced",
+      "tests": [
+        "tests/test_privacy_threat_model.py::TestPseudonymizationContract::test_pseudonymized_wallet_not_raw_stellar_address",
+        "tests/test_privacy_threat_model.py::TestPseudonymizationContract::test_same_address_same_token_determinism",
+        "tests/test_privacy_threat_model.py::TestNonLinkabilityAcrossKeys::test_different_keys_produce_different_tokens",
+        "tests/test_privacy_threat_model.py::TestSensitiveAttributeWhitelist::test_no_raw_stellar_addresses_in_output",
+        "tests/test_privacy_threat_model.py::TestTradeRecordPipeline::test_output_contains_no_raw_wallets",
+        "tests/test_privacy_threat_model.py::TestTradeRecordPipeline::test_all_audit_entries_irreversible",
+        "tests/test_privacy_threat_model.py::TestDateGeneralizationForLedgerCloseTime::test_day_granularity_strips_time",
+        "tests/test_privacy_threat_model.py::TestAuditLogCompleteness::test_audit_log_one_entry_per_transform",
+        "tests/test_privacy_threat_model.py::TestErrorPropagation::test_missing_wallet_field_raises_with_field_name",
+        "tests/test_privacy_threat_model.py::TestRedactionFallback::test_raise_on_match_blocks_leakage",
+        "tests/test_privacy_threat_model.py::TestPropertyBased::test_pseudonymize_never_returns_raw_address",
+        "tests/test_privacy_threat_model.py::TestPropertyBased::test_generalize_numeric_bucket_contains_original"
+      ]
+    },
+    {
+      "id": "482",
+      "title": "Build deterministic time and timezone handling utilities",
+      "tier": "advanced",
+      "tests": [
+        "tests/test_time_utils.py::TestUtcNow::test_returns_utc_aware_datetime",
+        "tests/test_time_utils.py::TestUtcNow::test_uses_frozen_clock_inside_context",
+        "tests/test_time_utils.py::TestEnsureUtc::test_passes_through_utc_datetime",
+        "tests/test_time_utils.py::TestEnsureUtc::test_raises_on_naive",
+        "tests/test_time_utils.py::TestEnsureUtc::test_raises_on_non_utc_offset",
+        "tests/test_time_utils.py::TestAsUtc::test_converts_positive_offset",
+        "tests/test_time_utils.py::TestParseIsoUtc::test_zulu_suffix",
+        "tests/test_time_utils.py::TestParseIsoUtc::test_rejects_naive_string",
+        "tests/test_time_utils.py::TestLedgerCloseTimeToUtc::test_accepts_utc",
+        "tests/test_time_utils.py::TestLedgerCloseTimeToUtc::test_strict_rejects_non_utc",
+        "tests/test_time_utils.py::TestFrozenClock::test_tick_advances_time",
+        "tests/test_time_utils.py::TestFrozenClock::test_thread_safety_concurrent_ticks",
+        "tests/test_time_utils.py::TestFrozenClockContextManager::test_utcnow_returns_frozen_time",
+        "tests/test_time_utils.py::TestFrozenClockContextManager::test_real_clock_restored_on_exception",
+        "tests/test_time_utils.py::TestFrozenClockContextManager::test_nested_frozen_clocks",
+        "tests/test_time_utils.py::TestTruncateToLedgerWindow::test_truncated_is_multiple_of_window_since_epoch",
+        "tests/test_time_utils.py::TestPropertyBased::test_as_utc_preserves_instant",
+        "tests/test_time_utils.py::TestPropertyBased::test_parse_iso_utc_roundtrip"
+      ]
+    }
+  ]
+}

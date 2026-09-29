@@ -128,6 +128,11 @@ def parse_args() -> argparse.Namespace:
         "--replay", action="store_true", help="Re-annotate previously skipped wallets"
     )
     parser.add_argument("--export", default="", help="Export queue to this parquet path and exit")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview export summary without writing the file (only with --export)",
+    )
     parser.add_argument("--batch-size", type=int, default=config.AL_BATCH_SIZE)
     return parser.parse_args()
 
@@ -137,8 +142,18 @@ def main() -> None:
     queue = AnnotationQueue(queue_path=args.queue)
 
     if args.export:
-        df = queue.export_labelled(args.export)
-        print(f"Exported {len(df)} annotated rows to {args.export}")
+        if args.dry_run:
+            df = queue.export_labelled("")  # Load without writing
+            print(f"\n=== Export Preview ===")
+            print(f"Total rows: {len(df)}")
+            if len(df) > 0:
+                label_counts = df.get("label", []).value_counts().to_dict() if "label" in df else {}
+                print(f"Label distribution: {label_counts}")
+                print(f"Annotators: {df.get('annotator_id', []).nunique() if 'annotator_id' in df else 0}")
+            print()
+        else:
+            df = queue.export_labelled(args.export)
+            print(f"Exported {len(df)} annotated rows to {args.export}")
         return
 
     if not args.annotator_id:
@@ -155,3 +170,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+# TODO(#733): Reject empty or whitespace-only --annotator-id at startup before any annotation is recorded.

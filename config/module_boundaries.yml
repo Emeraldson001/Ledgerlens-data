@@ -1,0 +1,67 @@
+# Module dependency / layering rules for Ledgerlens-data.
+#
+# Enforced by scripts/check_module_dependencies.py (see `make check-deps` and
+# the "Check module dependency rules" step in .github/workflows/ci.yml).
+#
+# Rule: a package in a lower layer must never import a package that lives in
+# a strictly higher layer. Imports within the same layer, and imports of
+# anything in a lower layer, are always allowed. This keeps low-level shared
+# code (utils, config) from silently growing a dependency on domain logic or
+# entrypoints, which is what makes it safe to import them from anywhere.
+#
+# Layers are ordered lowest-first.
+layers:
+  - name: foundation
+    description: >
+      Zero-dependency shared code. Importable from every other layer;
+      must not import anything above it.
+    packages:
+      - utils
+      - config
+
+  - name: domain
+    description: >
+      Business/domain logic: detection models, feature engineering,
+      ingestion, streaming, privacy, monitoring, reporting, etc. May depend
+      on foundation and on other domain packages, but never on entrypoints.
+    packages:
+      - detection
+      - features
+      - ingestion
+      - streaming
+      - privacy
+      - alerts
+      - analysis
+      - evaluation
+      - monitoring
+      - reporting
+      - integrations
+      - training
+
+  - name: entrypoint
+    description: >
+      Composition roots: HTTP API and operational CLI scripts. Free to
+      depend on anything below them.
+    packages:
+      - api
+      - scripts
+
+# Extra pairwise rules for cases the layer model doesn't capture, e.g. two
+# domain packages that should stay decoupled even though they're in the same
+# layer. Each entry: the importing package must not import the forbidden
+# package.
+forbidden_imports:
+  - importer: streaming
+    forbidden: api
+    reason: >
+      streaming workers must be runnable without the HTTP API process;
+      pulling in api/ would couple the two deployables together.
+
+# Local packages intentionally excluded from layering (tests, notebooks,
+# generated data, docs tooling). Imports from/to these are never checked.
+excluded_packages:
+  - tests
+  - notebooks
+  - data
+  - templates
+  - models

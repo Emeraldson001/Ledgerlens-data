@@ -11,6 +11,16 @@ Usage:
 The script joins AMM pool trade history with existing SDEX historical trades
 by timestamp and computes cross-venue features for every wallet in the combined
 trade set.  The result is written as Parquet to ``--output``.
+
+Checkpoint / resume
+--------------------
+Each pool is an independent, expensive Horizon fetch. Pass ``--checkpoint-file``
+to make a backfill resumable: a pool's trades are cached to Parquet next to the
+checkpoint file the first time they're fetched, and reused directly on a
+subsequent run instead of re-fetching; a pool whose fetch raises is recorded as
+failed and retried on the next run instead of aborting the whole backfill.
+Without ``--checkpoint-file`` the script behaves exactly as before. See
+docs/checkpointing.md.
 """
 
 import argparse
@@ -26,6 +36,7 @@ from detection.cross_venue_features import (
     detect_coordinated_clusters,
 )
 from ingestion.amm_pool_loader import PoolNotFoundError, load_amm_pool_trades
+from utils.checkpoint import PipelineCheckpoint
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -35,20 +46,94 @@ def _load_amm_trades_for_pools(
     pool_ids: list[str],
     since: datetime,
     until: datetime,
+    checkpoint: PipelineCheckpoint | None = None,
+    checkpoint_dir: Path | None = None,
+    progress_callback=None,
 ) -> pd.DataFrame:
+    """Load AMM trade history for every pool, optionally resuming via *checkpoint*.
+
+    When *checkpoint* is set: a pool already recorded as done is restored from
+    its cached Parquet artifact (or skipped outright if it had no trades in
+    range) instead of re-fetching; a pool whose fetch raises is recorded as
+    failed — logged and retried on the next ``--checkpoint-file`` run — instead
+    of propagating and aborting the whole backfill. Without a checkpoint, any
+    exception other than ``PoolNotFoundError`` propagates unchanged.
+
+    Progress callback is invoked after each pool is processed with:
+        (processed_count, total_count, rows_loaded, since, until)
+    """
     frames = []
-    for pool_id in pool_ids:
+    pending_ids = checkpoint.pending(pool_ids) if checkpoint is not None else pool_ids
+    processed_count = 0
+
+    if checkpoint is not None:
+        for pool_id in pool_ids:
+            if pool_id in pending_ids:
+                continue
+            processed_count += 1
+            cached_path = checkpoint.artifact_path(pool_id)
+            if cached_path is None:
+                logger.info("Pool %s already processed (no trades) — skipping", pool_id)
+            else:
+                logger.info("Pool %s already fetched — reusing cached %s", pool_id, cached_path)
+                frames.append(pd.read_parquet(cached_path))
+
+            rows_loaded = sum(len(f) for f in frames)
+            if progress_callback:
+                progress_callback(processed_count, len(pool_ids), rows_loaded, since, until)
+
+    for pool_id in pending_ids:
         logger.info("Loading AMM trades for pool %s …", pool_id)
         try:
             df = load_amm_pool_trades(pool_id, since, until)
-            if not df.empty:
-                df["pool_id"] = pool_id
-                frames.append(df)
-                logger.info("  → %d trades loaded", len(df))
-            else:
-                logger.info("  → no trades in range")
         except PoolNotFoundError:
             logger.warning("Pool %s not found — skipping", pool_id)
+            if checkpoint is not None:
+                checkpoint.record_success(pool_id, metadata={"found": False})
+            processed_count += 1
+            rows_loaded = sum(len(f) for f in frames)
+            if progress_callback:
+                progress_callback(processed_count, len(pool_ids), rows_loaded, since, until)
+            continue
+        except Exception as exc:
+            if checkpoint is None:
+                raise
+            logger.exception(
+                "Pool %s failed to load — recording for retry on next --resume", pool_id
+            )
+            checkpoint.record_failure(pool_id, exc)
+            processed_count += 1
+            rows_loaded = sum(len(f) for f in frames)
+            if progress_callback:
+                progress_callback(processed_count, len(pool_ids), rows_loaded, since, until)
+            continue
+
+        if df.empty:
+            logger.info("  → no trades in range")
+            if checkpoint is not None:
+                checkpoint.record_success(pool_id, metadata={"rows": 0})
+            processed_count += 1
+            rows_loaded = sum(len(f) for f in frames)
+            if progress_callback:
+                progress_callback(processed_count, len(pool_ids), rows_loaded, since, until)
+            continue
+
+        df["pool_id"] = pool_id
+        logger.info("  → %d trades loaded", len(df))
+
+        if checkpoint is not None:
+            assert checkpoint_dir is not None
+            artifact_path = checkpoint_dir / f"backfill_amm_trades_pool_{pool_id}.parquet"
+            df.to_parquet(artifact_path, index=False)
+            checkpoint.record_success(
+                pool_id, artifact_path=str(artifact_path), metadata={"rows": len(df)}
+            )
+
+        frames.append(df)
+        processed_count += 1
+        rows_loaded = sum(len(f) for f in frames)
+        if progress_callback:
+            progress_callback(processed_count, len(pool_ids), rows_loaded, since, until)
 
     if not frames:
         return pd.DataFrame()
@@ -113,6 +198,19 @@ def main() -> None:
         default="data/labelled_with_cross_venue.parquet",
         help="Output Parquet path",
     )
+    parser.add_argument(
+        "--checkpoint-file",
+        default=None,
+        help="Path to a JSON checkpoint enabling resumable per-pool backfill. Fetched "
+        "pool trades are cached to Parquet alongside this file and reused on resume. "
+        "See docs/checkpointing.md.",
+    )
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Discard an existing --checkpoint-file and start over. No effect without "
+        "--checkpoint-file.",
+    )
     args = parser.parse_args()
 
     since = datetime.fromisoformat(args.since).replace(tzinfo=UTC)
@@ -123,8 +221,35 @@ def main() -> None:
         logger.error("No pool IDs specified. Set --pool-ids or WATCHED_AMM_POOLS in .env")
         raise SystemExit(1)
 
-    amm_trades = _load_amm_trades_for_pools(pool_ids, since, until)
+    checkpoint: PipelineCheckpoint | None = None
+    checkpoint_dir: Path | None = None
+    if args.checkpoint_file:
+        checkpoint_dir = Path(args.checkpoint_file).parent
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint = PipelineCheckpoint.load_or_create(
+            path=args.checkpoint_file,
+            pipeline="backfill_amm_trades",
+            fingerprint_inputs={
+                "pool_ids": sorted(pool_ids),
+                "since": args.since,
+                "until": args.until,
+            },
+            fresh=args.fresh,
+        )
+
+    amm_trades = _load_amm_trades_for_pools(
+        pool_ids, since, until, checkpoint=checkpoint, checkpoint_dir=checkpoint_dir
+    )
     logger.info("Total AMM trades loaded: %d", len(amm_trades))
+
+    if checkpoint is not None:
+        summary = checkpoint.summary()
+        logger.info(
+            "[checkpoint] Run summary: %d completed, %d failed (%s)",
+            summary["completed"],
+            len(summary["failed"]),
+            summary["failed"] or "none",
+        )
 
     sdex_trades: pd.DataFrame
     if args.sdex_trades:

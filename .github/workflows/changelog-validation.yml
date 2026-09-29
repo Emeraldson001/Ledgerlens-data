@@ -1,0 +1,197 @@
+name: Changelog Validation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    paths:
+      - "CHANGELOG.md"
+  workflow_dispatch:
+
+jobs:
+  validate-changelog:
+    name: Validate Changelog
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history needed for diff-based checks
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Validate CHANGELOG.md structure
+        run: python scripts/validate_changelog.py
+
+      - name: Check PR has changelog coverage for data/model changes
+        if: github.event_name == 'pull_request'
+        run: |
+          python scripts/validate_changelog.py \
+            --check-pr \
+            --base-ref "origin/${{ github.base_ref }}"
+
+      - name: Verify [Unreleased] section is not stale
+        run: |
+          python - <<'EOF'
+          import re, pathlib, sys
+          from datetime import datetime, timezone
+
+          content = pathlib.Path("CHANGELOG.md").read_text()
+
+          # Find the most recent released version date
+          version_pattern = re.compile(
+              r"## \[(?P<version>\d+\.\d+\.\d+)\]\s+-\s+(?P<date>\d{4}-\d{2}-\d{2})"
+          )
+          versions = list(version_pattern.finditer(content))
+
+          if not versions:
+              print("⚠️  No released versions found — cannot check staleness")
+              sys.exit(0)
+
+          latest = max(versions, key=lambda m: m.group("date"))
+          latest_date = datetime.strptime(latest.group("date"), "%Y-%m-%d").replace(
+              tzinfo=timezone.utc
+          )
+          now = datetime.now(timezone.utc)
+          days_since_release = (now - latest_date).days
+
+          # Warn if [Unreleased] is empty but it's been >30 days since last release
+          unreleased_match = re.search(
+              r"## \[Unreleased\](.*?)(?=## \[|\Z)", content, re.DOTALL
+          )
+          section = unreleased_match.group(1).strip() if unreleased_match else ""
+          entries = [
+              ln for ln in section.splitlines()
+              if ln.strip() and not ln.strip().startswith("#")
+          ]
+
+          if days_since_release > 30 and not entries:
+              print(
+                  f"⚠️  It has been {days_since_release} days since v{latest.group('version')} "
+                  f"({latest.group('date')}) but [Unreleased] is empty. "
+                  f"Consider creating a new release or documenting recent changes."
+              )
+          else:
+              print(
+                  f"✅ Latest release: v{latest.group('version')} ({latest.group('date')}, "
+                  f"{days_since_release} days ago)"
+              )
+          EOF
+
+      - name: Check for model version bump on model file changes
+        if: github.event_name == 'pull_request'
+        run: |
+          python - <<'EOF'
+          import re, subprocess, sys, pathlib
+
+          MODEL_FILES = [
+              "detection/model_training.py",
+              "detection/model_inference.py", 
+              "detection/ensemble_calibrator.py",
+          ]
+
+          # Get changed files
+          result = subprocess.run(
+              ["git", "diff", "--name-only", f"origin/${{ github.base_ref }}", "HEAD"],
+              capture_output=True, text=True
+          )
+          changed = set(result.stdout.splitlines())
+
+          model_changed = any(f in changed for f in MODEL_FILES)
+          if not model_changed:
+              print("✅ No model files changed — version bump not required")
+              sys.exit(0)
+
+          # Check if version in config.py or CHANGELOG.md indicates a bump
+          changelog = pathlib.Path("CHANGELOG.md").read_text()
+          unreleased_match = re.search(
+              r"## \[Unreleased\](.*?)(?=## \[|\Z)", changelog, re.DOTALL
+          )
+          section = unreleased_match.group(1) if unreleased_match else ""
+
+          version_indicators = re.compile(
+              r"\b(version|v\d+\.\d+|model version|bump|upgrade|update)\b",
+              re.IGNORECASE
+          )
+          breaking_indicators = re.compile(
+              r"\b(breaking|incompatible|schema change|feature.*(add|remov|renam))\b",
+              re.IGNORECASE
+          )
+
+          if breaking_indicators.search(section):
+              print("⚠️  Breaking model/schema changes detected — ensure version is bumped")
+          elif model_changed and not section.strip():
+              print("⚠️  Model code changed but [Unreleased] is empty. Document changes.")
+          else:
+              print("✅ Model change is documented in [Unreleased]")
+          EOF
+
+      - name: Check data asset changes are documented
+        if: github.event_name == 'pull_request'
+        run: |
+          python - <<'EOF'
+          import subprocess, re, pathlib, sys
+
+          DATA_PATHS = [
+              "data/synthetic_dataset.parquet",
+              "data/feature_dictionary.md",
+              "data/feature_ranges.json",
+              "data/known_manipulation_events.csv",
+              "data/trade_avro_schema.json",
+          ]
+
+          result = subprocess.run(
+              ["git", "diff", "--name-only", f"origin/${{ github.base_ref }}", "HEAD"],
+              capture_output=True, text=True
+          )
+          changed = set(result.stdout.splitlines())
+
+          data_changed = [f for f in DATA_PATHS if f in changed]
+          if not data_changed:
+              print("✅ No critical data assets changed")
+              sys.exit(0)
+
+          changelog = pathlib.Path("CHANGELOG.md").read_text()
+          unreleased_match = re.search(
+              r"## \[Unreleased\](.*?)(?=## \[|\Z)", changelog, re.DOTALL
+          )
+          section = (unreleased_match.group(1) if unreleased_match else "").strip()
+
+          if not section:
+              print(
+                  f"❌ Data assets changed ({data_changed}) but [Unreleased] is empty.\n"
+                  "   Document the data change, including:\n"
+                  "   - What changed and why\n"
+                  "   - Impact on downstream consumers (API, dashboard, contract)\n"
+                  "   - Whether the feature schema hash will change"
+              )
+              sys.exit(1)
+
+          print(f"✅ Data asset changes ({len(data_changed)}) documented in [Unreleased]")
+          EOF
+
+      - name: Annotate PR with changelog summary
+        if: github.event_name == 'pull_request'
+        run: |
+          python - <<'EOF'
+          import re, pathlib
+
+          content = pathlib.Path("CHANGELOG.md").read_text()
+          unreleased_match = re.search(
+              r"## \[Unreleased\](.*?)(?=## \[|\Z)", content, re.DOTALL
+          )
+          if unreleased_match:
+              section = unreleased_match.group(1).strip()
+              entries = [ln for ln in section.splitlines() if ln.strip()]
+              print(f"📋 [Unreleased] contains {len(entries)} lines")
+              for line in entries[:15]:
+                  print(f"   {line}")
+              if len(entries) > 15:
+                  print(f"   ... ({len(entries) - 15} more)")
+          else:
+              print("⚠️  No [Unreleased] section found")
+          EOF

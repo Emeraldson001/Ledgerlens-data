@@ -73,3 +73,64 @@ def test_load_queue_empty_secret_skips(tmp_path, base_annotations, caplog):
 
     assert len(annotations) == 2
     assert "Skipping signature verification" in caplog.text
+
+
+def test_annotate_dry_run_preview(tmp_path, monkeypatch, capsys):
+    """Test --dry-run flag previews export without writing file."""
+    import sys
+    from datetime import datetime
+
+    from detection.active_learning.annotation_queue import AnnotationQueue
+    from scripts.annotate import main
+
+    # Setup test queue with annotated items
+    queue_file = tmp_path / "queue.json"
+    queue_data = [
+        {
+            "wallet": "GABC123",
+            "label": 1,
+            "annotator_id": "alice",
+            "annotated_at": "2024-01-01T12:00:00",
+            "status": "annotated",
+        },
+        {
+            "wallet": "GXYZ456",
+            "label": 0,
+            "annotator_id": "alice",
+            "annotated_at": "2024-01-02T12:00:00",
+            "status": "annotated",
+        },
+    ]
+
+    # Compute HMACs for valid annotations
+    from detection.active_learning.annotation_queue import _compute_hmac
+    from utils.secrets_config import get_secret
+    from utils.secrets_manager import SecretType
+
+    for item in queue_data:
+        item["annotation_hmac"] = _compute_hmac(
+            item["wallet"],
+            item["label"],
+            item["annotator_id"],
+            item["annotated_at"],
+        )
+
+    queue_file.write_text(json.dumps(queue_data))
+
+    # Test --dry-run (no file written)
+    export_file = tmp_path / "export.parquet"
+    monkeypatch.setattr(sys, "argv", ["annotate.py", "--export", str(export_file), "--dry-run", "--queue", str(queue_file)])
+    main()
+
+    captured = capsys.readouterr()
+    assert "Export Preview" in captured.out
+    assert "Total rows: 2" in captured.out
+    assert not export_file.exists(), "File should not be created with --dry-run"
+
+    # Test normal export (file written)
+    monkeypatch.setattr(sys, "argv", ["annotate.py", "--export", str(export_file), "--queue", str(queue_file)])
+    main()
+
+    captured = capsys.readouterr()
+    assert "Exported 2 annotated rows" in captured.out
+    assert export_file.exists(), "File should be created without --dry-run"

@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 
 import run_pipeline
+from config import Config
 
 
 def _run_dry_run(argv: list[str]) -> MagicMock:
@@ -77,9 +78,14 @@ def test_dry_run_skips_persist():
 
 
 def test_dry_run_skips_submit_onchain():
-    with patch(
-        "integrations.contract_client.LedgerLensContractClient.submit_score"
-    ) as submit_score:
+    # --submit-onchain now validates the "pipeline_onchain" contract (see
+    # config/contracts.py), so the on-chain vars must be set even though this
+    # is a dry run and submit_score() is never actually called.
+    with (
+        patch.object(Config, "LEDGERLENS_CONTRACT_ID", "contract-id"),
+        patch.object(Config, "LEDGERLENS_SUBMITTER_SECRET", "secret"),
+        patch("integrations.contract_client.LedgerLensContractClient.submit_score") as submit_score,
+    ):
         _run_dry_run(["--dry-run", "--submit-onchain", "--no-orderbook"])
     submit_score.assert_not_called()
 

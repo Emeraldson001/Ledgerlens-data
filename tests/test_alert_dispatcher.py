@@ -98,6 +98,16 @@ def test_webhook_rejects_http_url():
         AlertDispatcher(channel="webhook", webhook_url="http://example.com")
 
 
+def test_webhook_rejects_non_https_scheme_naming_offending_value():
+    with pytest.raises(ValueError, match="ftp://insecure.example.com"):
+        AlertDispatcher(channel="webhook", webhook_url="ftp://insecure.example.com")
+
+
+def test_webhook_accepts_https_url():
+    dispatcher = AlertDispatcher(channel="webhook", webhook_url="https://hooks.example.com/alert")
+    assert dispatcher._webhook_url == "https://hooks.example.com/alert"
+
+
 # ---------------------------------------------------------------------------
 # 6. Webhook — correct payload posted to HTTPS endpoint
 # ---------------------------------------------------------------------------

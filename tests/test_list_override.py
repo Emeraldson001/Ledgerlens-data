@@ -35,6 +35,22 @@ def test_list_override_basic(temp_lists):
     assert override.check("GUNKNOWN") is None
 
 
+def test_list_override_conflict_allow_takes_precedence(tmp_path):
+    """When a wallet appears in both allow and deny lists, allow takes precedence."""
+    allowpath = tmp_path / "allowlist.json"
+    denypath = tmp_path / "denylist.json"
+
+    # Configure same wallet in both lists
+    conflicting_wallet = "GCONFLICT123"
+    allowpath.write_text(json.dumps([conflicting_wallet]))
+    denypath.write_text(json.dumps([conflicting_wallet]))
+
+    override = ListOverride(allowlist_path=str(allowpath), denylist_path=str(denypath))
+
+    # Allow list takes precedence: wallet should return 0 (allow)
+    assert override.check(conflicting_wallet) == 0
+
+
 def test_list_override_hot_reload(temp_lists, monkeypatch):
     allowpath, denypath = temp_lists
     override = ListOverride(allowlist_path=str(allowpath), denylist_path=str(denypath))

@@ -1,4 +1,18 @@
-"""Kafka producer that publishes Horizon SSE trades as Avro to per-pair topics.
+"""Kafka producer for trade event partitioning by asset pair ID.
+
+Trades are produced to a Kafka topic with the partition key set to the canonical
+asset_pair_id (sorted alphabetically). This ensures all trades for a given pair
+land on the same partition, enabling independent per-partition consumers to
+compute Benford metrics in parallel.
+
+Partition Key Format:
+    CODE:ISSUER/CODE:ISSUER (alphabetically sorted by CODE:ISSUER)
+    Example: USDC:GA.../XLM:native
+
+Dead-letter Topic:
+    Malformed asset pair IDs are routed to {topic}-dlq for validation failure.
+
+Kafka producer that publishes Horizon SSE trades as Avro to per-pair topics.
 
 ``HorizonKafkaProducer`` is the ingestion half of the Kafka streaming backend
 (Issue #36).  For every trade it:
@@ -22,24 +36,110 @@ Failure handling
 from __future__ import annotations
 
 import json
+import os
 import re
+import socket
+import time
 
 from confluent_kafka import KafkaException, Producer
 
 from config import config
 from ingestion.avro_codec import load_schema, serialize, trade_to_record
 from ingestion.data_models import Trade
-from utils.logging import get_logger
+from ingestion.exceptions import InvalidInputError
+from monitoring.ingestion_metrics import emit_ingestion_failure, emit_ingestion_success
+from utils.logging import get_logger, log_context
 from utils.retry import retry_with_backoff
 
 logger = get_logger(__name__)
 
+try:
+    from prometheus_client import Counter
+
+    ledgerlens_ingestion_trades_produced_total = Counter(
+        "ledgerlens_ingestion_trades_produced_total",
+        "Number of trades successfully produced to Kafka",
+        ["topic"],
+    )
+    ledgerlens_ingestion_trades_failed_total = Counter(
+        "ledgerlens_ingestion_trades_failed_total",
+        "Number of trades failed during ingestion",
+        ["reason"],
+    )
+except ImportError:
+    ledgerlens_ingestion_trades_produced_total = None
+    ledgerlens_ingestion_trades_failed_total = None
+
 _SANITISE_RE = re.compile(r"[^a-zA-Z0-9._-]+")
+
+_ASSET_CODE_RE = re.compile(r"^[A-Z0-9]{1,12}$")
+_ISSUER_RE = re.compile(r"^G[A-Z0-9]{55}$")
 
 
 def sanitise_pair(asset_pair: str) -> str:
     """Turn an ``asset_pair`` string into a Kafka-topic-safe suffix."""
     return _SANITISE_RE.sub("_", asset_pair).strip("_")
+
+
+def _validate_asset_code(code: str) -> bool:
+    """Stellar asset codes are 1-12 uppercase alphanumeric characters."""
+    return bool(_ASSET_CODE_RE.match(code))
+
+
+def _validate_issuer(issuer: str) -> bool:
+    """Accept ``"native"`` or a 56-char Stellar account ID (``G`` + 55 chars)."""
+    if issuer == "native":
+        return True
+    return bool(_ISSUER_RE.match(issuer))
+
+
+def _to_canonical_pair_id(code_a: str, issuer_a: str, code_b: str, issuer_b: str) -> str:
+    """Return a deterministic ``CODE:ISSUER/CODE:ISSUER`` partition key.
+
+    The two assets are sorted alphabetically by ``CODE:ISSUER`` so the same
+    pair always produces the same key regardless of input order — this keeps
+    all trades for a pair on the same Kafka partition.
+    """
+    if not _validate_asset_code(code_a):
+        raise InvalidInputError(
+            f"Invalid asset A code: {code_a!r}",
+            source="kafka_producer._to_canonical_pair_id",
+            reason="asset A code failed Stellar format validation",
+        )
+    if not _validate_issuer(issuer_a):
+        raise InvalidInputError(
+            f"Invalid asset A issuer: {issuer_a!r}",
+            source="kafka_producer._to_canonical_pair_id",
+            reason="asset A issuer failed Stellar format validation",
+        )
+    if not _validate_asset_code(code_b):
+        raise InvalidInputError(
+            f"Invalid asset B code: {code_b!r}",
+            source="kafka_producer._to_canonical_pair_id",
+            reason="asset B code failed Stellar format validation",
+        )
+    if not _validate_issuer(issuer_b):
+        raise InvalidInputError(
+            f"Invalid asset B issuer: {issuer_b!r}",
+            source="kafka_producer._to_canonical_pair_id",
+            reason="asset B issuer failed Stellar format validation",
+        )
+
+    asset_a = f"{code_a}:{issuer_a}"
+    asset_b = f"{code_b}:{issuer_b}"
+    return "/".join(sorted([asset_a, asset_b]))
+
+
+def _build_transactional_id() -> str:
+    """Build a unique transactional ID per worker instance (hostname + PID).
+
+    In multi-tenant deployments the prefix can be overridden via
+    ``KAFKA_TRANSACTIONAL_ID_PREFIX`` to avoid exposing hostnames.
+    """
+    prefix = config.KAFKA_TRANSACTIONAL_ID_PREFIX
+    hostname = socket.gethostname()
+    pid = os.getpid()
+    return f"{prefix}-{hostname}-{pid}"
 
 
 class HorizonKafkaProducer:
@@ -53,15 +153,24 @@ class HorizonKafkaProducer:
         dlq_topic: str | None = None,
         schema_path: str | None = None,
         producer: Producer | None = None,
+        transactional: bool = False,
     ) -> None:
         self._topic_prefix = topic_prefix or config.KAFKA_TOPIC_PREFIX
         self._dlq_topic = dlq_topic or config.KAFKA_DLQ_TOPIC
         self._schema = load_schema(schema_path)
-        self._producer = (
-            producer
-            if producer is not None
-            else Producer(_build_producer_conf(bootstrap_servers or config.KAFKA_BOOTSTRAP_SERVERS))
-        )
+        self._transactional = transactional
+
+        if producer is not None:
+            self._producer = producer
+        else:
+            servers = bootstrap_servers or config.KAFKA_BOOTSTRAP_SERVERS
+            conf = _build_producer_conf(servers)
+            if transactional:
+                conf["transactional.id"] = _build_transactional_id()
+                conf["transaction.timeout.ms"] = config.KAFKA_TRANSACTION_TIMEOUT_MS
+            self._producer = Producer(conf)
+            if transactional:
+                self._producer.init_transactions()
 
     # ------------------------------------------------------------------
     # Public API
@@ -72,24 +181,93 @@ class HorizonKafkaProducer:
         return f"{self._topic_prefix}.{sanitise_pair(asset_pair)}"
 
     def produce_trade(self, trade: Trade) -> None:
-        """Serialise and produce *trade*; route serialisation failures to the DLQ."""
-        record = trade_to_record(trade)
+        """Serialise and produce *trade*; route serialisation failures to the DLQ.
+
+        Each Kafka message carries an ``avro-schema-version`` header whose value
+        is the hex-encoded CRC-32 fingerprint of the schema used for encoding.
+        Consumers can use this header to select the correct deserialisation schema
+        without requiring an external Schema Registry.
+        """
+        from ingestion.avro_codec import _avro_crc32_fingerprint
+
+        with log_context(pipeline_stage="ingestion.kafka_producer", trade_id=trade.trade_id):
+            started_at = time.perf_counter()
+            record = trade_to_record(trade)
+            try:
+                value = serialize(record, self._schema)
+            except Exception as exc:  # noqa: BLE001
+                # Broad catch justified: Avro serialization can fail on any aspect of the
+                # record (field type mismatch, missing required fields, etc.). These are
+                # permanent failures for a specific trade, not retryable. Log and route
+                # to DLQ for human review rather than stopping the producer.
+                emit_ingestion_failure(
+                    "kafka",
+                    exc,
+                    stage="validation",
+                    duration_seconds=time.perf_counter() - started_at,
+                )
+                logger.error(
+                    "Serialisation failed for trade %s — routing to DLQ: %s",
+                    record.get("trade_id"),
+                    exc,
+                )
+                if ledgerlens_ingestion_trades_failed_total:
+                    ledgerlens_ingestion_trades_failed_total.labels(
+                        reason="serialisation_error"
+                    ).inc()
+                self._produce_to_dlq(record, reason=str(exc))
+                return
+
+            topic = self.topic_for_pair(record["asset_pair"])
+            # Partition key = wallet_id (base account) → per-wallet ordering.
+            key = record["base_account"].encode("utf-8")
+            # Schema version header: hex CRC-32 fingerprint of the encoding schema.
+            schema_fp = hex(_avro_crc32_fingerprint(self._schema) & 0xFFFFFFFF).encode("utf-8")
+            try:
+                self._produce_with_headers(topic, value, key, schema_fp)
+            except Exception as exc:
+                emit_ingestion_failure(
+                    "kafka",
+                    exc,
+                    stage="publish",
+                    duration_seconds=time.perf_counter() - started_at,
+                )
+                raise
+            emit_ingestion_success(
+                "kafka",
+                stage="publish",
+                record_count=1,
+                duration_seconds=time.perf_counter() - started_at,
+            )
+            self._producer.poll(0)
+
+    def begin_transaction(self) -> None:
+        """Begin a Kafka transaction (requires transactional=True at construction)."""
+        self._producer.begin_transaction()
+
+    def commit_transaction(self, consumer, positions: list | None = None) -> None:
+        """Commit in-flight transaction and optionally send consumer offsets.
+
+        *positions* is a list of ``TopicPartition`` objects with the offsets to
+        commit atomically inside the transaction.
+        """
+        if positions:
+            self._producer.send_offsets_to_transaction(
+                positions, consumer.consumer_group_metadata()
+            )
+        self._producer.commit_transaction()
+
+    def abort_transaction(self, transaction_id: str, offset: int) -> None:
+        """Abort the current transaction and log for replay investigation."""
         try:
-            value = serialize(record, self._schema)
-        except Exception as exc:  # serialisation / validation failure → DLQ
+            self._producer.abort_transaction()
+        except KafkaException as exc:
             logger.error(
-                "Serialisation failed for trade %s — routing to DLQ: %s",
-                record.get("trade_id"),
+                "abort_transaction failed — txn_id=%s offset=%d err=%s",
+                transaction_id,
+                offset,
                 exc,
             )
-            self._produce_to_dlq(record, reason=str(exc))
-            return
-
-        topic = self.topic_for_pair(record["asset_pair"])
-        # Partition key = wallet_id (base account) → per-wallet ordering.
-        key = record["base_account"].encode("utf-8")
-        self._produce(topic, value, key)
-        self._producer.poll(0)
 
     def flush(self, timeout: float = 10.0) -> int:
         """Block until all queued messages are delivered; returns # still in queue."""
@@ -106,6 +284,22 @@ class HorizonKafkaProducer:
     )
     def _produce(self, topic: str, value: bytes, key: bytes) -> None:
         self._producer.produce(topic=topic, value=value, key=key, on_delivery=_on_delivery)
+
+    @retry_with_backoff(
+        max_attempts=5,
+        base_delay_seconds=0.5,
+        exceptions=(KafkaException, BufferError),
+    )
+    def _produce_with_headers(
+        self, topic: str, value: bytes, key: bytes, headers: list[tuple[str, bytes]]
+    ) -> None:
+        self._producer.produce(
+            topic=topic,
+            value=value,
+            key=key,
+            headers=headers,
+            on_delivery=_on_delivery,
+        )
 
     def _produce_to_dlq(self, record: dict, reason: str) -> None:
         """Produce a poison-pill envelope to the DLQ — raw payload + reason.
@@ -126,6 +320,8 @@ class HorizonKafkaProducer:
             )
             self._producer.poll(0)
         except (KafkaException, BufferError) as exc:
+            if ledgerlens_ingestion_trades_failed_total:
+                ledgerlens_ingestion_trades_failed_total.labels(reason="dlq_produce_error").inc()
             logger.critical("Failed to write to DLQ topic %s: %s", self._dlq_topic, exc)
 
 
@@ -140,6 +336,11 @@ def _safe_raw(record: dict) -> dict:
 def _on_delivery(err, msg) -> None:
     if err is not None:
         logger.warning("Delivery failed for topic %s: %s", msg.topic() if msg else "?", err)
+        if ledgerlens_ingestion_trades_failed_total:
+            ledgerlens_ingestion_trades_failed_total.labels(reason="kafka_delivery_error").inc()
+    else:
+        if ledgerlens_ingestion_trades_produced_total and msg and msg.topic():
+            ledgerlens_ingestion_trades_produced_total.labels(topic=msg.topic()).inc()
 
 
 def _build_producer_conf(bootstrap_servers: str) -> dict:

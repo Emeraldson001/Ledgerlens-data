@@ -33,13 +33,17 @@ class CrossChainEdge(Base):
 
     __tablename__ = "cross_chain_edges"
     __table_args__ = (
-        UniqueConstraint("source_address", "target_address", "link_type", name="uq_source_target_type"),
+        UniqueConstraint(
+            "source_address", "target_address", "link_type", name="uq_source_target_type"
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     source_address: Mapped[str] = mapped_column(String, nullable=False, index=True)
     target_address: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    link_type: Mapped[str] = mapped_column(String, nullable=False)  # "bridge", "amount_fingerprint", "timing_correlation", "shared_deposit"
+    link_type: Mapped[str] = mapped_column(
+        String, nullable=False
+    )  # "bridge", "amount_fingerprint", "timing_correlation", "shared_deposit"
     confidence: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
     metadata_json: Mapped[str | None] = mapped_column(String, nullable=True)
 
@@ -97,10 +101,10 @@ class IdentityGraph:
                         chain = "ethereum"
                     elif not addr.startswith("G") and len(addr) >= 32 and len(addr) <= 44:
                         chain = "solana"
-                    
+
                     new_node = CrossChainNode(address=addr, chain=chain, risk_score=0.0)
                     session.add(new_node)
-            
+
             existing = session.scalar(
                 select(CrossChainEdge).where(
                     CrossChainEdge.source_address == source,
@@ -149,13 +153,17 @@ class IdentityGraph:
             with self._session_factory() as session:
                 edges = session.scalars(
                     select(CrossChainEdge).where(
-                        (CrossChainEdge.source_address == current) |
-                        (CrossChainEdge.target_address == current)
+                        (CrossChainEdge.source_address == current)
+                        | (CrossChainEdge.target_address == current)
                     )
                 ).all()
 
                 for edge in edges:
-                    neighbor = edge.target_address if edge.source_address == current else edge.source_address
+                    neighbor = (
+                        edge.target_address
+                        if edge.source_address == current
+                        else edge.source_address
+                    )
                     if neighbor not in visited and neighbor not in queue:
                         neighbor_node = session.get(CrossChainNode, neighbor)
                         if neighbor_node:

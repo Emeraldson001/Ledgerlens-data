@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 import requests
 
 from config import config
+from streaming.alert_ledger import AlertDeliveryLedger
 from utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -39,6 +40,7 @@ class AlertDispatcher:
         threshold_controller: ThresholdController | None = None,
         max_retries: int = 3,
         base_delay: float = 2.0,
+        delivery_ledger: AlertDeliveryLedger | None = None,
     ):
         if channel not in ("stdout", "webhook", "websocket"):
             raise ValueError(f"Unknown alert channel: {channel!r}")
@@ -53,12 +55,19 @@ class AlertDispatcher:
         self._threshold_controller = threshold_controller
         self._max_retries = max_retries
         self._base_delay = base_delay
+        # Optional — no ledger means no reconciliation coverage but zero
+        # behavior/side-effect change from before this dispatcher gained a
+        # ledger (Issue #670, required scope E). The live entry points
+        # (scripts/stream.py, scripts/kafka_workers.py) pass a real one.
+        self._delivery_ledger = delivery_ledger
 
         if channel == "webhook":
             if not self._webhook_url:
                 raise ValueError("ALERT_WEBHOOK_URL is required when alert channel is 'webhook'")
-            if self._webhook_url.startswith("http://"):
-                raise ValueError("ALERT_WEBHOOK_URL must use https:// — http:// is not allowed")
+            if not self._webhook_url.startswith("https://"):
+                raise ValueError(
+                    "ALERT_WEBHOOK_URL must start with https:// — got " f"{self._webhook_url!r}"
+                )
 
         self._cooldowns: dict[str, float] = {}
         self._lock = threading.Lock()
@@ -75,6 +84,15 @@ class AlertDispatcher:
         with self._lock:
             now = time.time()
             if wallet in self._cooldowns and now < self._cooldowns[wallet]:
+                if self._delivery_ledger is not None:
+                    self._delivery_ledger.record(
+                        wallet,
+                        pair_id,
+                        risk_score,
+                        "suppressed_cooldown",
+                        channel=self._channel,
+                        reason=f"cooldown active until {self._cooldowns[wallet]:.0f}",
+                    )
                 return
             self._cooldowns[wallet] = now + self._alert_cooldown_seconds
 
@@ -98,16 +116,36 @@ class AlertDispatcher:
             self._deliver_websocket(wallet, risk_score, pair_id)
 
     def _deliver_stdout(self, wallet: str, risk_score: dict, pair_id: str) -> None:
-        logger.info("Alert dispatched", extra={
-            "wallet": wallet,
-            "pair_id": pair_id,
-            "score": risk_score["score"],
-            "benford_flag": risk_score.get("benford_flag"),
-            "ml_flag": risk_score.get("ml_flag"),
-            "confidence": risk_score.get("confidence")
-        })
+        # Human-readable line on real stdout — this is what the "stdout" channel
+        # name promises, and what operators tailing the process expect to see.
+        print(
+            f"[ALERT] wallet={wallet} pair={pair_id}"
+            f" score={risk_score['score']}"
+            f" benford={risk_score.get('benford_flag')}"
+            f" ml={risk_score.get('ml_flag')}"
+            f" confidence={risk_score.get('confidence')}"
+        )
+        # Structured JSON log for aggregation/observability tooling.
+        logger.info(
+            "Alert dispatched",
+            extra={
+                "wallet": wallet,
+                "pair_id": pair_id,
+                "score": risk_score["score"],
+                "benford_flag": risk_score.get("benford_flag"),
+                "ml_flag": risk_score.get("ml_flag"),
+                "confidence": risk_score.get("confidence"),
+                "score_lower": risk_score.get("score_lower"),
+                "score_upper": risk_score.get("score_upper"),
+                "coverage_guarantee": risk_score.get("coverage_guarantee"),
+            },
+        )
+        if self._delivery_ledger is not None:
+            self._delivery_ledger.record(wallet, pair_id, risk_score, "delivered", channel="stdout")
 
-    def _write_to_dead_letter(self, payload: dict) -> None:
+    def _write_to_dead_letter(
+        self, payload: dict, *, wallet: str, risk_score: dict, pair_id: str, reason: str
+    ) -> None:
         try:
             path = config.ALERT_DEAD_LETTER_PATH
             dir_name = os.path.dirname(path)
@@ -117,6 +155,10 @@ class AlertDispatcher:
                 f.write(json.dumps(payload) + "\n")
         except Exception as exc:
             logger.error("Failed to write alert to dead-letter file: %s", exc)
+        if self._delivery_ledger is not None:
+            self._delivery_ledger.record(
+                wallet, pair_id, risk_score, "dead_lettered", channel="webhook", reason=reason
+            )
 
     def _deliver_webhook(self, wallet: str, risk_score: dict, pair_id: str) -> None:
         payload = {**risk_score, "wallet": wallet, "pair_id": pair_id}
@@ -124,6 +166,10 @@ class AlertDispatcher:
             try:
                 resp = requests.post(self._webhook_url or "", json=payload, timeout=5)
                 resp.raise_for_status()
+                if self._delivery_ledger is not None:
+                    self._delivery_ledger.record(
+                        wallet, pair_id, risk_score, "delivered", channel="webhook"
+                    )
                 return
             except requests.HTTPError as exc:
                 status_code = exc.response.status_code
@@ -132,7 +178,13 @@ class AlertDispatcher:
                         "Webhook delivery failed (HTTP %s) — client error, will not retry",
                         status_code,
                     )
-                    self._write_to_dead_letter(payload)
+                    self._write_to_dead_letter(
+                        payload,
+                        wallet=wallet,
+                        risk_score=risk_score,
+                        pair_id=pair_id,
+                        reason=f"HTTP {status_code} client error",
+                    )
                     return
                 else:
                     logger.warning(
@@ -152,8 +204,18 @@ class AlertDispatcher:
                 time.sleep(delay)
             else:
                 logger.error("Webhook delivery failed after %d retries", self._max_retries)
-                self._write_to_dead_letter(payload)
+                self._write_to_dead_letter(
+                    payload,
+                    wallet=wallet,
+                    risk_score=risk_score,
+                    pair_id=pair_id,
+                    reason=f"exhausted {self._max_retries} retries",
+                )
 
     def _deliver_websocket(self, wallet: str, risk_score: dict, pair_id: str) -> None:
         payload = {**risk_score, "wallet": wallet, "pair_id": pair_id}
         self._ws_client.send(json.dumps(payload))
+        if self._delivery_ledger is not None:
+            self._delivery_ledger.record(
+                wallet, pair_id, risk_score, "delivered", channel="websocket"
+            )

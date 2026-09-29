@@ -14,8 +14,9 @@ from detection.adversarial.robustness import (
     most_vulnerable_features,
 )
 from detection.model_inference import RiskScorer
-from detection.model_training import save_models, train_models
+from detection.model_training import train_models
 from scripts.generate_synthetic_dataset import generate_synthetic_dataset
+from tests.conftest import build_signed_model_dir
 
 
 @pytest.fixture(scope="module")
@@ -23,8 +24,11 @@ def scorer_and_data(tmp_path_factory):
     df = generate_synthetic_dataset(n_wallets=80, seed=7)
     results = train_models(df, test_size=0.3, random_state=7)
     model_dir = str(tmp_path_factory.mktemp("adv_models"))
-    save_models(results, model_dir)
-    return RiskScorer(model_dir=model_dir), df
+    public_key, transparency_log = build_signed_model_dir(results, model_dir)
+    return (
+        RiskScorer(model_dir=model_dir, public_key=public_key, transparency_log=transparency_log),
+        df,
+    )
 
 
 def _wash_row(df):

@@ -50,3 +50,29 @@ def test_print_dataset_summary_handles_empty_dataframe():
     buf = io.StringIO()
     print_dataset_summary(pd.DataFrame(), profile="NaiveAttacker", file=buf)
     assert buf.getvalue() == ""
+
+
+def test_generate_synthetic_dataset_produces_correct_class_balance():
+    """Test that generated dataset has expected 50/50 class balance."""
+    df = generate_synthetic_dataset(n_wallets=100, seed=42)
+
+    # Verify we have exactly 50 wash-trade and 50 legitimate
+    wash_count = int((df["label"] == 1).sum())
+    legit_count = int((df["label"] == 0).sum())
+
+    assert wash_count == 50, f"Expected 50 wash-trade, got {wash_count}"
+    assert legit_count == 50, f"Expected 50 legitimate, got {legit_count}"
+    assert wash_count + legit_count == 100, "Total rows should be 100"
+
+
+def test_print_dataset_summary_includes_exact_percentages():
+    """Test that summary shows precise percentages for deterministic seed."""
+    df = generate_synthetic_dataset(n_wallets=50, seed=99)
+    buf = io.StringIO()
+
+    print_dataset_summary(df, profile="NaiveAttacker", file=buf)
+    text = buf.getvalue()
+
+    # With n_wallets=50, seed=99, we should have 25 wash and 25 legitimate
+    # (feature-level generation splits at n_wallets // 2)
+    assert "(50.0%)" in text, "Should show 50% for balanced dataset"

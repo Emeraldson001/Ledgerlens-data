@@ -11,10 +11,12 @@ import pytest
 
 from ingestion.amm_pool_loader import (
     PoolNotFoundError,
+    _amm_record_to_trade,
     _validate_pool_id,
     list_active_pools,
     load_amm_pool_trades,
 )
+from ingestion.exceptions import InvalidInputError, RecordValidationError, SourceUnavailableError
 
 VALID_POOL_ID = "a" * 64
 ANOTHER_POOL_ID = "b" * 64
@@ -26,8 +28,8 @@ _SAMPLE_RECORD = {
     "id": "trade-001",
     "paging_token": "12345-0",
     "ledger_close_time": "2024-01-10T12:00:00Z",
-    "base_account": "GBASE123",
-    "counter_account": "GCOUNTER456",
+    "base_account": "GCGPQMCLRXCUPCL3AVMYUUQML2WVC7A5M6HO5RKYSU4CIA7O7SI4VKWE",
+    "counter_account": "GB2HHLFDCBSBDAMU2QRDU4AJV63WQE2DWT7MBZWZRQDFYUXJXIPPUG7M",
     "base_asset_type": "credit_alphanum4",
     "base_asset_code": "USDC",
     "base_asset_issuer": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
@@ -38,6 +40,44 @@ _SAMPLE_RECORD = {
     "counter_amount": "50.0000000",
     "price": {"n": "2", "d": "1"},
 }
+
+
+def test_amm_record_to_trade_raises_typed_error_on_missing_field():
+    record = dict(_SAMPLE_RECORD)
+    del record["ledger_close_time"]
+
+    with pytest.raises(RecordValidationError) as excinfo:
+        _amm_record_to_trade(record)
+
+    assert excinfo.value.source == "amm_pool_loader._amm_record_to_trade"
+    assert excinfo.value.raw is not None
+
+
+def test_amm_record_to_trade_raises_typed_error_on_bad_amount():
+    record = dict(_SAMPLE_RECORD)
+    record["base_amount"] = "not-a-number"
+
+    with pytest.raises(RecordValidationError):
+        _amm_record_to_trade(record)
+
+
+def test_amm_record_to_trade_tolerates_an_unparseable_price():
+    """The price fallback to 0.0 predates typed exceptions and must be preserved."""
+    record = dict(_SAMPLE_RECORD)
+    record["price"] = {"n": "1", "d": "0"}
+
+    assert _amm_record_to_trade(record).price == 0.0
+
+
+def test_pool_not_found_is_a_typed_source_unavailable_error():
+    assert issubclass(PoolNotFoundError, SourceUnavailableError)
+
+
+def test_invalid_pool_id_error_is_typed_and_still_a_value_error():
+    with pytest.raises(InvalidInputError) as excinfo:
+        _validate_pool_id("abc123")
+
+    assert isinstance(excinfo.value, ValueError)
 
 
 def _make_page(records, has_next=False):
@@ -102,8 +142,10 @@ def test_load_amm_pool_trades_returns_correct_schema(monkeypatch):
         set(df.columns)
     ), f"Missing columns: {expected_cols - set(df.columns)}"
     assert len(df) == 1
-    assert df.iloc[0]["base_account"] == "GBASE123"
-    assert df.iloc[0]["counter_account"] == "GCOUNTER456"
+    assert df.iloc[0]["base_account"] == "GCGPQMCLRXCUPCL3AVMYUUQML2WVC7A5M6HO5RKYSU4CIA7O7SI4VKWE"
+    assert (
+        df.iloc[0]["counter_account"] == "GB2HHLFDCBSBDAMU2QRDU4AJV63WQE2DWT7MBZWZRQDFYUXJXIPPUG7M"
+    )
     assert (
         df.iloc[0]["base_asset"] == "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
     )

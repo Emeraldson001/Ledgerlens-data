@@ -1,0 +1,197 @@
+name: Ownership Metadata Validation
+
+on:
+  push:
+    paths:
+      - ".github/CODEOWNERS"
+      - ".github/ownership.yml"
+  pull_request:
+    paths:
+      - ".github/CODEOWNERS"
+      - ".github/ownership.yml"
+      - "detection/**"
+      - "ingestion/**"
+      - "streaming/**"
+      - "integrations/**"
+      - "monitoring/**"
+  workflow_dispatch:
+
+jobs:
+  validate-ownership:
+    name: Validate Ownership Metadata
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install PyYAML
+        run: pip install PyYAML
+
+      - name: Validate ownership.yml structure
+        run: |
+          python - <<'EOF'
+          import yaml, sys, pathlib
+
+          ownership_path = pathlib.Path(".github/ownership.yml")
+          if not ownership_path.exists():
+              print("❌ .github/ownership.yml not found")
+              sys.exit(1)
+
+          try:
+              data = yaml.safe_load(ownership_path.read_text())
+          except yaml.YAMLError as e:
+              print(f"❌ ownership.yml is invalid YAML: {e}")
+              sys.exit(1)
+
+          required_top_keys = {"subsystems"}
+          missing = required_top_keys - data.keys()
+          if missing:
+              print(f"❌ ownership.yml missing top-level keys: {missing}")
+              sys.exit(1)
+
+          required_subsystem_fields = {
+              "name", "description", "paths", "team",
+              "tech_lead", "on_call", "risk", "escalation"
+          }
+          valid_risk_levels = {"critical", "high", "medium", "low"}
+
+          errors = []
+          for subsystem_id, sub in data["subsystems"].items():
+              missing_fields = required_subsystem_fields - sub.keys()
+              if missing_fields:
+                  errors.append(f"  {subsystem_id}: missing fields {missing_fields}")
+
+              risk = sub.get("risk")
+              if risk and risk not in valid_risk_levels:
+                  errors.append(f"  {subsystem_id}: invalid risk level '{risk}'")
+
+              escalation = sub.get("escalation", [])
+              if not escalation:
+                  errors.append(f"  {subsystem_id}: escalation path is empty")
+
+              paths = sub.get("paths", [])
+              if not paths:
+                  errors.append(f"  {subsystem_id}: paths list is empty")
+
+          if errors:
+              print("❌ ownership.yml validation errors:")
+              for e in errors:
+                  print(e)
+              sys.exit(1)
+
+          print(f"✅ ownership.yml valid — {len(data['subsystems'])} subsystems defined")
+          EOF
+
+      - name: Check critical subsystems have owners
+        run: |
+          python - <<'EOF'
+          import yaml, sys, pathlib
+
+          data = yaml.safe_load(pathlib.Path(".github/ownership.yml").read_text())
+          subsystems = data["subsystems"]
+
+          critical_unowned = []
+          for sid, sub in subsystems.items():
+              if sub.get("risk") in ("critical", "high"):
+                  if not sub.get("team") or not sub.get("tech_lead"):
+                      critical_unowned.append(sid)
+
+          if critical_unowned:
+              print(f"❌ Critical/high subsystems missing ownership: {critical_unowned}")
+              sys.exit(1)
+
+          critical_count = sum(1 for s in subsystems.values() if s.get("risk") == "critical")
+          high_count = sum(1 for s in subsystems.values() if s.get("risk") == "high")
+          print(f"✅ All critical/high subsystems have owners")
+          print(f"   critical: {critical_count}, high: {high_count}")
+          EOF
+
+      - name: Check CODEOWNERS syntax
+        run: |
+          python - <<'EOF'
+          import re, sys, pathlib
+
+          codeowners = pathlib.Path(".github/CODEOWNERS")
+          if not codeowners.exists():
+              print("❌ .github/CODEOWNERS not found")
+              sys.exit(1)
+
+          errors = []
+          team_pattern = re.compile(r"^@[\w-]+(/[\w-]+)?$")
+
+          for lineno, line in enumerate(codeowners.read_text().splitlines(), 1):
+              line = line.strip()
+              if not line or line.startswith("#"):
+                  continue
+              parts = line.split()
+              if len(parts) < 2:
+                  errors.append(f"  line {lineno}: no owners specified for pattern '{parts[0]}'")
+                  continue
+              for owner in parts[1:]:
+                  if not team_pattern.match(owner):
+                      errors.append(f"  line {lineno}: invalid owner format '{owner}'")
+
+          if errors:
+              print("❌ CODEOWNERS syntax errors:")
+              for e in errors:
+                  print(e)
+              sys.exit(1)
+
+          print("✅ CODEOWNERS syntax valid")
+          EOF
+
+      - name: Report subsystem ownership summary
+        run: |
+          python - <<'EOF'
+          import yaml, pathlib
+
+          data = yaml.safe_load(pathlib.Path(".github/ownership.yml").read_text())
+          subsystems = data["subsystems"]
+
+          print("## Subsystem Ownership Summary\n")
+          print(f"{'Subsystem':<35} {'Risk':<10} {'Team':<35} {'Tech Lead'}")
+          print("-" * 110)
+          for sid, sub in sorted(subsystems.items(), key=lambda x: x[1].get("risk", "low")):
+              print(
+                  f"{sub['name']:<35} {sub.get('risk', 'N/A'):<10} "
+                  f"{sub.get('team', 'N/A'):<35} {sub.get('tech_lead', 'N/A')}"
+              )
+          EOF
+
+      - name: Check stale ownership reviews
+        run: |
+          python - <<'EOF'
+          import yaml, sys, pathlib
+          from datetime import datetime, timezone
+
+          data = yaml.safe_load(pathlib.Path(".github/ownership.yml").read_text())
+          subsystems = data["subsystems"]
+
+          now = datetime.now(timezone.utc)
+          stale_threshold_days = 180  # 6 months
+
+          stale = []
+          for sid, sub in subsystems.items():
+              last_reviewed = sub.get("last_reviewed")
+              if last_reviewed:
+                  reviewed_date = datetime.strptime(str(last_reviewed), "%Y-%m-%d").replace(
+                      tzinfo=timezone.utc
+                  )
+                  days_ago = (now - reviewed_date).days
+                  if days_ago > stale_threshold_days:
+                      stale.append((sid, sub["name"], days_ago))
+
+          if stale:
+              print(f"⚠️  {len(stale)} subsystem(s) with stale ownership reviews (>{stale_threshold_days} days):")
+              for sid, name, days in stale:
+                  print(f"   {name}: reviewed {days} days ago")
+              # Warning only — don't fail the build for stale reviews
+          else:
+              print("✅ All ownership reviews are recent")
+          EOF

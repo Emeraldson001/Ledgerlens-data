@@ -13,6 +13,7 @@ from stellar_sdk import Server
 
 from config import config
 from ingestion.data_models import AccountActivity
+from ingestion.exceptions import record_context
 from utils.logging import get_logger
 from utils.retry import retry_with_backoff
 
@@ -31,6 +32,10 @@ def load_account_activity(account_id: str) -> AccountActivity | None:
     to the account that funded the creation, or ``None`` if no
     ``account_created`` effect exists (e.g. genesis accounts or accounts
     outside Horizon's history window).
+
+    Raises:
+        RecordValidationError: If an ``account_created`` effect is present but
+            malformed.
     """
     server = Server(horizon_url=config.HORIZON_URL)
     call_builder = server.effects().for_account(account_id).limit(200).order(desc=False)
@@ -40,11 +45,12 @@ def load_account_activity(account_id: str) -> AccountActivity | None:
 
     for record in records:
         if record.get("type") == "account_created":
-            return AccountActivity(
-                account_id=record["account"],
-                account_created_at=record["created_at"],
-                funding_account=record.get("funder"),
-            )
+            with record_context("account_activity_loader.load_account_activity", record):
+                return AccountActivity(
+                    account_id=record["account"],
+                    account_created_at=record["created_at"],
+                    funding_account=record.get("funder"),
+                )
 
     return None
 

@@ -12,6 +12,7 @@ Features:
 """
 
 import asyncio
+import ipaddress
 import json
 import os
 import re
@@ -25,7 +26,9 @@ from prometheus_client import Counter, Gauge
 from pydantic import BaseModel, Field, ValidationError
 
 from config import config
+from config.contracts import validate_mode
 from streaming.pubsub_router import PubSubRouter
+from streaming.ws_abuse_detector import AbuseDetector
 from streaming.ws_auth import JWTAuthenticator
 from utils.logging import get_logger
 
@@ -239,6 +242,7 @@ _replay_buffer = ReplayBuffer(config.WS_REPLAY_BUFFER_SIZE)
 _router = PubSubRouter()
 _auth: JWTAuthenticator | None = None
 _loop: asyncio.AbstractEventLoop | None = None
+_abuse_detector = AbuseDetector()
 
 
 def _get_auth() -> JWTAuthenticator:
@@ -371,9 +375,14 @@ async def _handler(websocket) -> None:
             _process_outbound(websocket, client_queue, client_id, rate_limiter)
         )
 
+        # Task 3: Heartbeat — sends a WebSocket ping every WS_HEARTBEAT_INTERVAL_SECONDS.
+        # If the client doesn't respond with a pong within the timeout, the connection
+        # is considered dead and the task exits, triggering cleanup via FIRST_COMPLETED.
+        heartbeat_task = asyncio.create_task(_heartbeat(websocket, client_id))
+
         # Wait for either task to complete or for client to disconnect
         done, pending = await asyncio.wait(
-            [inbound_task, outbound_task],
+            [inbound_task, outbound_task, heartbeat_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
 
@@ -395,6 +404,7 @@ async def _handler(websocket) -> None:
 
         if client_id:
             _router.disconnect(client_id)
+            _abuse_detector.reset(client_id)
             with _clients_lock:
                 _clients.pop(client_id, None)
                 ws_connected_clients.set(len(_clients))
@@ -417,13 +427,13 @@ async def _extract_token(websocket) -> str | None:
         Token string if found, None otherwise
     """
     # Try Authorization header
-    auth_header = websocket.request_headers.get("Authorization", "")
+    auth_header = websocket.request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         return str(auth_header[7:])
 
     # Try query parameter
-    if websocket.request_headers.get("Path"):
-        path = websocket.request_headers.get("Path", "")
+    if websocket.request.path:
+        path = websocket.request.path
         if "?token=" in path:
             try:
                 token = path.split("?token=")[1].split("&")[0]
@@ -447,6 +457,23 @@ async def _process_inbound(websocket, client_id: str, permissions: set[str]) -> 
             try:
                 payload = json.loads(message_str)
                 msg_type = payload.get("type")
+
+                # Abuse detection: check rate-limit and wallet-targeting
+                # Use the channel from a subscribe payload if present, else "unknown"
+                check_channel = ""
+                if msg_type == "subscribe":
+                    channels_val = payload.get("channels", [])
+                    check_channel = channels_val[0] if channels_val else ""
+                verdict = _abuse_detector.record(client_id, check_channel)
+                if verdict.blocked:
+                    error = ErrorMessage(
+                        code=verdict.reason,
+                        message="Connection blocked due to abuse detection.",
+                        retry_after_ms=verdict.retry_after_seconds * 1000,
+                    )
+                    await websocket.send(error.model_dump_json())
+                    await websocket.close(code=1008, reason=verdict.reason)
+                    return
 
                 if msg_type == "subscribe":
                     await _handle_subscribe(websocket, client_id, permissions, payload)
@@ -602,6 +629,35 @@ async def _handle_replay(websocket, client_id: str, permissions: set[str], paylo
         await websocket.send(error.model_dump_json())
 
 
+async def _heartbeat(websocket, client_id: str) -> None:
+    """Send periodic WebSocket pings to detect zombie (abruptly-disconnected) clients.
+
+    The ``websockets`` library automatically handles the pong response and raises
+    ``ConnectionClosed`` if the client does not reply within its internal timeout
+    or if the connection is already dead.  When that happens this coroutine exits,
+    which — via ``asyncio.wait(FIRST_COMPLETED)`` in ``_handler`` — triggers the
+    cleanup ``finally`` block that removes the client from ``_clients``.
+
+    The heartbeat interval is ``config.WS_HEARTBEAT_INTERVAL_SECONDS`` (default
+    30 s, configurable via ``WS_HEARTBEAT_INTERVAL_SECONDS``).
+    """
+    try:
+        while True:
+            await asyncio.sleep(config.WS_HEARTBEAT_INTERVAL_SECONDS)
+            try:
+                await websocket.ping()
+            except websockets.exceptions.ConnectionClosed:
+                logger.debug(
+                    "WebSocket heartbeat detected dead connection for client %s", client_id
+                )
+                break
+            except Exception as exc:
+                logger.warning("WebSocket heartbeat error for client %s: %s", client_id, exc)
+                break
+    except asyncio.CancelledError:
+        pass
+
+
 async def _process_outbound(
     websocket, queue: asyncio.Queue, client_id: str, rate_limiter: TokenBucket
 ) -> None:
@@ -680,11 +736,14 @@ async def publish_score_update(score_event: dict) -> None:
             logger.warning("Score event missing wallet or asset_pair", extra={"event": score_event})
             return
 
-        logger.info("Score event published", extra={
-            "wallet": wallet_id,
-            "asset_pair": asset_pair,
-            "score": score_event.get("score")
-        })
+        logger.info(
+            "Score event published",
+            extra={
+                "wallet": wallet_id,
+                "asset_pair": asset_pair,
+                "score": score_event.get("score"),
+            },
+        )
 
         # Get next sequence number
         seq = _seq_counter.next()
@@ -799,6 +858,22 @@ def push_alert_sync(payload: dict) -> None:
 # ─────────────────────────────────────────────────────────────────────────
 
 
+def _is_loopback_host(host: str) -> bool:
+    """Return True if `host` is a loopback address that is safe to bind by default.
+
+    Accepts the literal ``localhost`` alias and any address in the IPv4/IPv6
+    loopback ranges (e.g. 127.0.0.1, 127.0.0.5, ::1). A non-loopback address
+    such as 0.0.0.0 or a routable interface IP returns False. Unparseable hosts
+    are treated as non-loopback so they fail closed.
+    """
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 async def run_ws_server(host: str = "127.0.0.1", port: int = 8765) -> None:
     """Run the WebSocket server and block until cancelled.
 
@@ -809,8 +884,13 @@ async def run_ws_server(host: str = "127.0.0.1", port: int = 8765) -> None:
     effective_host = os.getenv("WS_BIND_HOST", host)
     effective_port = int(os.getenv("WS_PORT", str(port)))
 
-    if effective_host == "0.0.0.0" and not os.getenv("WS_ALLOW_EXTERNAL"):
-        raise ValueError("Binding WebSocket server to 0.0.0.0 requires WS_ALLOW_EXTERNAL=1")
+    # Fail closed: binding to any non-loopback address exposes the server to the
+    # network and must be an explicit, documented opt-in (WS_ALLOW_EXTERNAL=1).
+    if not _is_loopback_host(effective_host) and not os.getenv("WS_ALLOW_EXTERNAL"):
+        raise ValueError(
+            f"Refusing to bind WebSocket server to non-loopback host "
+            f"'{effective_host}': set WS_ALLOW_EXTERNAL=1 to allow external binding."
+        )
 
     logger.info("WebSocket server listening on %s:%d", effective_host, effective_port)
     async with websockets.serve(_handler, effective_host, effective_port):
@@ -820,10 +900,16 @@ async def run_ws_server(host: str = "127.0.0.1", port: int = 8765) -> None:
 def start_ws_server_thread(host: str = "127.0.0.1", port: int = 8765) -> threading.Thread:
     """Launch the WebSocket server in a daemon thread.
 
+    Validates the "ws_server" config contract first (e.g. JWT_PUBLIC_KEY_PATH
+    must exist) so a misconfigured deployment fails immediately here instead
+    of every client hitting a FileNotFoundError on first connection.
+
     Returns:
         Threading.Thread object (daemon=True)
     """
     global _loop
+
+    validate_mode("ws_server")
 
     ready = threading.Event()
 

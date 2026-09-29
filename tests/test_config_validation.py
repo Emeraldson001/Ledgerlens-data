@@ -10,6 +10,7 @@ from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
+import pytest
 
 import run_pipeline
 from config import Config
@@ -65,11 +66,31 @@ def test_dry_run_skips_persist():
 
 
 def test_dry_run_skips_submit_onchain():
-    with patch(
-        "integrations.contract_client.LedgerLensContractClient.submit_score"
-    ) as submit_score:
+    # --submit-onchain now validates the "pipeline_onchain" contract (see
+    # config/contracts.py), so the on-chain vars must be set even though this
+    # is a dry run and submit_score() is never actually called.
+    with (
+        patch.object(Config, "LEDGERLENS_CONTRACT_ID", "contract-id"),
+        patch.object(Config, "LEDGERLENS_SUBMITTER_SECRET", "secret"),
+        patch("integrations.contract_client.LedgerLensContractClient.submit_score") as submit_score,
+    ):
         _run_dry_run(["--dry-run", "--submit-onchain", "--no-orderbook"])
     submit_score.assert_not_called()
+
+
+def test_submit_onchain_without_contract_id_raises():
+    """--submit-onchain must fail fast if the on-chain contract isn't configured.
+
+    Regression test for the ordering bug where run_pipeline.main() validated
+    config *before* parsing --submit-onchain, so it always validated the
+    non-onchain contract and silently let submission proceed unconfigured.
+    """
+    with (
+        patch.object(Config, "LEDGERLENS_CONTRACT_ID", ""),
+        patch.object(Config, "LEDGERLENS_SUBMITTER_SECRET", ""),
+        pytest.raises(OSError, match="LEDGERLENS_CONTRACT_ID"),
+    ):
+        _run_dry_run(["--dry-run", "--submit-onchain", "--no-orderbook"])
 
 
 def test_dry_run_still_prints_flagged(caplog):

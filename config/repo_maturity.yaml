@@ -1,0 +1,180 @@
+# LedgerLens Repository Maturity Configuration
+# =============================================
+# Issue #560 — Repository maturity tracking
+#
+# This file defines the five-dimension maturity model used by
+# ``scripts/repo_maturity.py``.  Teams can tune scoring thresholds here
+# without modifying Python code.
+#
+# Composite score = Σ (dimension.score × dimension.weight)
+# The weights below sum to 1.00.
+
+version: "1.0"
+description: "LedgerLens repository maturity model (five dimensions, 0–100 each)"
+
+# Minimum composite score for the CI advisory gate to pass (exit 0).
+default_threshold: 60
+
+dimensions:
+
+  # -----------------------------------------------------------------------
+  # 1. Tests — breadth and quality of the test suite
+  # -----------------------------------------------------------------------
+  tests:
+    weight: 0.25
+    description: >
+      Measures test coverage breadth: number of test modules, presence of
+      integration and fuzz test sub-directories, conftest.py, and tests
+      for parsing contracts and reconciliation checks.
+    checks:
+      - id: test_module_count
+        description: "At least 20 test modules in tests/"
+        threshold: 20
+        deduction_if_below: 30
+      - id: integration_tests
+        description: "tests/integration/ directory present"
+        deduction_if_missing: 10
+      - id: fuzz_tests
+        description: "tests/fuzz/ directory present"
+        deduction_if_missing: 5
+      - id: conftest
+        description: "tests/conftest.py present"
+        deduction_if_missing: 5
+      - id: parsing_reconciliation_tests
+        description: "At least one test file for parsing or reconciliation"
+        deduction_if_missing: 5
+
+  # -----------------------------------------------------------------------
+  # 2. Docs — documentation completeness and inline docstrings
+  # -----------------------------------------------------------------------
+  docs:
+    weight: 0.20
+    description: >
+      Measures documentation completeness: presence of key markdown files
+      (README, CONTRIBUTING, CHANGELOG, security docs), and inline
+      docstring coverage in core Python modules.
+    checks:
+      - id: readme
+        path: "README.md"
+        deduction_if_missing: 10
+      - id: contributing
+        path: "CONTRIBUTING.md"
+        deduction_if_missing: 5
+      - id: changelog
+        path: "CHANGELOG.md"
+        deduction_if_missing: 5
+      - id: security_doc
+        path: "docs/security.md"
+        deduction_if_missing: 5
+      - id: drift_detection_doc
+        path: "docs/drift_detection.md"
+        deduction_if_missing: 5
+      - id: docstring_coverage_threshold
+        description: "≥ 80% of detection+ingestion modules have module-level docstrings"
+        high_threshold: 80
+        medium_threshold: 50
+        deduction_below_high: 5
+        deduction_below_medium: 15
+
+  # -----------------------------------------------------------------------
+  # 3. CI — continuous integration and automation maturity
+  # -----------------------------------------------------------------------
+  ci:
+    weight: 0.20
+    description: >
+      Measures CI/CD maturity: presence of workflow files, mutation testing,
+      lint/format gates, validation suite, and notebook execution.
+    checks:
+      - id: ci_workflow
+        path: ".github/workflows/ci.yml"
+        deduction_if_missing: 20
+      - id: retrain_workflow
+        path: ".github/workflows/retrain.yml"
+        deduction_if_missing: 10
+      - id: active_learning_workflow
+        path: ".github/workflows/active_learning.yml"
+        deduction_if_missing: 5
+      - id: makefile_mutation_test
+        description: "Makefile has 'mutation-test' target"
+        deduction_if_missing: 5
+      - id: makefile_lint
+        description: "Makefile has 'lint' target"
+        deduction_if_missing: 5
+      - id: makefile_test
+        description: "Makefile has 'test' target"
+        deduction_if_missing: 5
+      - id: makefile_validate
+        description: "Makefile has 'validate' target (Issue #558)"
+        deduction_if_missing: 5
+      - id: pyproject_toml
+        path: "pyproject.toml"
+        deduction_if_missing: 10
+
+  # -----------------------------------------------------------------------
+  # 4. Data quality — parsing contracts, reconciliation, and ground truth
+  # -----------------------------------------------------------------------
+  data_quality:
+    weight: 0.20
+    description: >
+      Measures data contract health: presence of the parsing contracts module
+      (#552), reconciliation checks module (#554), contributor validation CLI
+      (#558), known manipulation events, feature ranges, and synthetic dataset.
+    checks:
+      - id: parsing_contracts
+        path: "validation/parsing.py"
+        description: "CSV/JSON parsing contracts (Issue #552)"
+        deduction_if_missing: 20
+      - id: reconciliation_checks
+        path: "validation/reconciliation.py"
+        description: "Reconciliation checks (Issue #554)"
+        deduction_if_missing: 20
+      - id: validate_script
+        path: "scripts/validate.py"
+        description: "Contributor validation CLI (Issue #558)"
+        deduction_if_missing: 10
+      - id: manipulation_events
+        path: "data/known_manipulation_events.csv"
+        description: "Ground truth manipulation events CSV"
+        deduction_if_missing: 15
+        min_rows: 5
+        deduction_below_min: 10
+      - id: feature_ranges
+        path: "data/feature_ranges.json"
+        deduction_if_missing: 5
+      - id: synthetic_dataset
+        path: "data/synthetic_dataset.parquet"
+        deduction_if_missing: 10
+
+  # -----------------------------------------------------------------------
+  # 5. Security — privacy, adversarial defences, and secrets hygiene
+  # -----------------------------------------------------------------------
+  security:
+    weight: 0.15
+    description: >
+      Measures security posture: presence of security documentation, differential
+      privacy modules, adversarial defences, model integrity artefacts, and
+      secrets-hygiene (env example file, audit trail).
+    checks:
+      - id: security_doc
+        path: "docs/security.md"
+        deduction_if_missing: 10
+      - id: threat_model
+        path: "docs/security_threat_model.md"
+        deduction_if_missing: 10
+      - id: differential_privacy
+        path: "detection/differential_privacy.py"
+        deduction_if_missing: 15
+      - id: adversarial_defences
+        path: "detection/adversarial"
+        description: "Adversarial defences directory"
+        deduction_if_missing: 10
+      - id: model_metrics
+        path: "models/metrics.json"
+        deduction_if_missing: 5
+      - id: env_example
+        path: ".env.example"
+        description: "Secrets documentation via .env.example"
+        deduction_if_missing: 5
+      - id: audit_trail
+        path: "detection/audit_trail.py"
+        deduction_if_missing: 5

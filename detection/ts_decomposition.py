@@ -124,3 +124,93 @@ def decompose_trade_amounts(
         return pd.Series(result.resid, index=series.index)
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Volume TS feature extraction (issue #260)
+# ---------------------------------------------------------------------------
+
+
+def compute_volume_trend_slope(series: pd.Series) -> float:
+    """Linear regression slope of volume, normalised by mean volume.
+
+    Returns ``NaN`` for series with fewer than ``_MIN_OBS_FOR_STL`` observations.
+    """
+    if len(series) < _MIN_OBS_FOR_STL:
+        return float("nan")
+    x = np.arange(len(series), dtype=np.float64)
+    y = series.values.astype(np.float64)
+    slope = float(np.polyfit(x, y, 1)[0])
+    mean_vol = float(series.mean())
+    return slope / (mean_vol + 1e-9)
+
+
+def compute_volume_seasonality_strength(result) -> float:
+    """Ratio of seasonal component variance to (seasonal + residual) variance.
+
+    Returns ``NaN`` when *result* is ``None``.
+    """
+    if result is None:
+        return float("nan")
+    seasonal_var = float(np.var(np.asarray(result.seasonal)))
+    resid_var = float(np.var(np.asarray(result.resid)))
+    total = seasonal_var + resid_var
+    if total == 0.0:
+        return 0.0
+    return seasonal_var / total
+
+
+def compute_volume_residual_anomaly(result) -> float:
+    """Fraction of time bins whose residual exceeds mean + 2 * std.
+
+    Returns ``NaN`` when *result* is ``None``.
+    """
+    if result is None:
+        return float("nan")
+    resid = np.asarray(result.resid, dtype=np.float64)
+    mean_r = float(np.mean(resid))
+    std_r = float(np.std(resid))
+    if std_r == 0.0:
+        return 0.0
+    return float(np.mean(resid > mean_r + 2.0 * std_r))
+
+
+def compute_ts_features(wallet_trades: pd.DataFrame) -> dict[str, float]:
+    """Compute three volume time-series features from *wallet_trades*.
+
+    Features
+    --------
+    volume_trend_slope
+        Normalised linear regression slope of the 30-day hourly volume series.
+    volume_seasonality_strength
+        Fraction of variance explained by the seasonal component (STL,
+        period=24 h).  High values (≥ 0.8) indicate mechanical, predictable
+        trading.
+    volume_residual_anomaly
+        Fraction of hourly bins whose STL residual exceeds mean + 2 std.
+        High values indicate bursty, unexplained volume spikes.
+
+    Returns NaN for all three features when fewer than 48 hourly bins are
+    available (< 48 h of data).  Uses STL with ``robust=True`` so outlier
+    events do not distort the trend estimate.
+    """
+    nan_result: dict[str, float] = {
+        "volume_trend_slope": float("nan"),
+        "volume_seasonality_strength": float("nan"),
+        "volume_residual_anomaly": float("nan"),
+    }
+
+    series = to_amount_time_series(wallet_trades, freq="1h")
+    if len(series) < _MIN_OBS_FOR_STL:
+        return nan_result
+
+    try:
+        result = decompose_amounts(series, period=_DEFAULT_PERIOD)
+    except Exception:
+        return nan_result
+
+    return {
+        "volume_trend_slope": compute_volume_trend_slope(series),
+        "volume_seasonality_strength": compute_volume_seasonality_strength(result),
+        "volume_residual_anomaly": compute_volume_residual_anomaly(result),
+    }

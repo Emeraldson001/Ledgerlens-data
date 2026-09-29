@@ -88,7 +88,7 @@ def generate_dataset_from_profile(
             seed=seed,
         )
 
-    from scripts.wash_trade_simulator import AdaptiveAttacker, BaseAttackerProfile, create_profile
+    from scripts.wash_trade_simulator import BaseAttackerProfile, create_profile
 
     profile: BaseAttackerProfile
     if profile_name == "AdaptiveAttacker" and model_path:

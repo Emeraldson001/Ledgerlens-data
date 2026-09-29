@@ -1,0 +1,311 @@
+# ownership.yml — LedgerLens-data ownership metadata for critical subsystems
+#
+# This file is the machine-readable source of truth for subsystem ownership.
+# It supplements the .github/CODEOWNERS file with richer metadata:
+#   - on-call contacts
+#   - SLO targets
+#   - risk classification
+#   - escalation paths
+#
+# Used by: release readiness checks, incident response runbooks,
+#           the ownership-check CI step.
+#
+# Schema:
+#   subsystems:
+#     <id>:
+#       name: Human-readable name
+#       description: What this subsystem does
+#       paths: [list of glob patterns owned by this subsystem]
+#       team: GitHub team slug (@Ledger-Lenz/...)
+#       tech_lead: GitHub username
+#       on_call: GitHub username (may differ from tech_lead)
+#       risk: critical | high | medium | low
+#       slo:
+#         availability: "99.9%"
+#         latency_p99_ms: 500
+#       escalation:
+#         - level: 1
+#           contact: <github-username>
+#           after_minutes: 15
+#         - level: 2
+#           contact: <github-username>
+#           after_minutes: 60
+#       runbook: docs/<runbook>.md
+#       last_reviewed: YYYY-MM-DD
+
+subsystems:
+
+  ingestion_pipeline:
+    name: "Data Ingestion Pipeline"
+    description: >
+      Streams and bulk-loads trade history from the Stellar Horizon API,
+      AMM liquidity pools, and order-book events. Feeds the detection engine.
+    paths:
+      - "ingestion/**"
+      - "run_pipeline.py"
+    team: "@Ledger-Lenz/data-core"
+    tech_lead: "@ledgerlens-data-lead"
+    on_call: "@ledgerlens-data-lead"
+    risk: critical
+    slo:
+      availability: "99.5%"
+      latency_p99_ms: 10000
+    escalation:
+      - level: 1
+        contact: "@ledgerlens-data-lead"
+        after_minutes: 15
+      - level: 2
+        contact: "@ledgerlens-maintainer"
+        after_minutes: 60
+    runbook: "docs/ingestion.md"
+    last_reviewed: "2026-06-13"
+
+  detection_engine:
+    name: "Detection Engine (Benford + ML)"
+    description: >
+      Computes Benford's Law metrics, extracts 36+ on-chain features, and
+      runs the Random Forest / XGBoost / LightGBM ensemble to produce
+      the LedgerLens Risk Score (0–100).
+    paths:
+      - "detection/benford_engine.py"
+      - "detection/feature_engineering.py"
+      - "detection/model_training.py"
+      - "detection/model_inference.py"
+      - "detection/wallet_graph.py"
+      - "detection/gnn_encoder.py"
+      - "detection/drift_monitor.py"
+      - "detection/ensemble_calibrator.py"
+    team: "@Ledger-Lenz/ml-core"
+    tech_lead: "@ledgerlens-ml-lead"
+    on_call: "@ledgerlens-ml-lead"
+    risk: critical
+    slo:
+      availability: "99.9%"
+      latency_p99_ms: 200
+    escalation:
+      - level: 1
+        contact: "@ledgerlens-ml-lead"
+        after_minutes: 10
+      - level: 2
+        contact: "@ledgerlens-maintainer"
+        after_minutes: 30
+    runbook: "docs/model_rollback_runbook.md"
+    last_reviewed: "2026-06-13"
+
+  privacy_dp:
+    name: "Privacy & Differential Privacy"
+    description: >
+      Differentially-private SHAP explanations (Gaussian mechanism),
+      Rényi composition budget tracking, field encryption, and
+      membership-inference defences.
+    paths:
+      - "detection/privacy/**"
+      - "detection/differential_privacy.py"
+      - "detection/shap_explainer.py"
+      - "utils/field_encryption.py"
+      - "privacy/**"
+    team: "@Ledger-Lenz/security"
+    tech_lead: "@ledgerlens-security-lead"
+    on_call: "@ledgerlens-security-lead"
+    risk: critical
+    slo:
+      availability: "99.9%"
+      latency_p99_ms: 500
+    escalation:
+      - level: 1
+        contact: "@ledgerlens-security-lead"
+        after_minutes: 5
+      - level: 2
+        contact: "@ledgerlens-maintainer"
+        after_minutes: 20
+    runbook: "docs/privacy.md"
+    last_reviewed: "2026-06-13"
+
+  adversarial_robustness:
+    name: "Adversarial Robustness"
+    description: >
+      FGSM / PGD evasion attack evaluation, adversarial training augmentation,
+      Byzantine-fault-tolerant ensemble voting, backdoor detection.
+    paths:
+      - "detection/adversarial/**"
+      - "scripts/run_adversarial_eval.py"
+      - "scripts/adversarial_eval.py"
+      - "scripts/adversarial_training_loop.py"
+    team: "@Ledger-Lenz/security"
+    tech_lead: "@ledgerlens-security-lead"
+    on_call: "@ledgerlens-security-lead"
+    risk: high
+    slo:
+      availability: "99.0%"
+      latency_p99_ms: 5000
+    escalation:
+      - level: 1
+        contact: "@ledgerlens-security-lead"
+        after_minutes: 30
+      - level: 2
+        contact: "@ledgerlens-maintainer"
+        after_minutes: 120
+    runbook: "docs/adversarial_robustness.md"
+    last_reviewed: "2026-06-13"
+
+  streaming_pipeline:
+    name: "Real-time Streaming Pipeline"
+    description: >
+      Scores wallets in real time as trades land on Stellar (SSE or Kafka),
+      dispatches alerts within one ledger close (~5 seconds), and broadcasts
+      to dashboard via WebSocket.
+    paths:
+      - "streaming/**"
+      - "scripts/stream.py"
+      - "scripts/kafka_workers.py"
+    team: "@Ledger-Lenz/data-core"
+    tech_lead: "@ledgerlens-data-lead"
+    on_call: "@ledgerlens-data-lead"
+    risk: high
+    slo:
+      availability: "99.5%"
+      latency_p99_ms: 5000
+    escalation:
+      - level: 1
+        contact: "@ledgerlens-data-lead"
+        after_minutes: 15
+      - level: 2
+        contact: "@ledgerlens-infra-lead"
+        after_minutes: 45
+    runbook: "docs/streaming_architecture.md"
+    last_reviewed: "2026-06-13"
+
+  soroban_integration:
+    name: "Soroban Contract Integration"
+    description: >
+      Submits and reads risk scores from the ledgerlens-score Soroban smart
+      contract, handles ZK attestation and governance contract interactions.
+    paths:
+      - "integrations/**"
+    team: "@Ledger-Lenz/contracts"
+    tech_lead: "@ledgerlens-contracts-lead"
+    on_call: "@ledgerlens-contracts-lead"
+    risk: critical
+    slo:
+      availability: "99.0%"
+      latency_p99_ms: 10000
+    escalation:
+      - level: 1
+        contact: "@ledgerlens-contracts-lead"
+        after_minutes: 15
+      - level: 2
+        contact: "@ledgerlens-maintainer"
+        after_minutes: 60
+    runbook: "docs/scoring.md"
+    last_reviewed: "2026-06-13"
+
+  model_persistence:
+    name: "Model Persistence & Risk Score Store"
+    description: >
+      SQLAlchemy RiskScore model, DB connection pooling, upsert/read
+      repository, ring_id migration, and artifact integrity verification.
+    paths:
+      - "detection/persistence.py"
+      - "detection/risk_score_store.py"
+      - "scripts/migrate_add_ring_id.py"
+      - "models/**"
+    team: "@Ledger-Lenz/ml-core"
+    tech_lead: "@ledgerlens-ml-lead"
+    on_call: "@ledgerlens-ml-lead"
+    risk: critical
+    slo:
+      availability: "99.9%"
+      latency_p99_ms: 100
+    escalation:
+      - level: 1
+        contact: "@ledgerlens-ml-lead"
+        after_minutes: 10
+      - level: 2
+        contact: "@ledgerlens-maintainer"
+        after_minutes: 30
+    runbook: "docs/model_governance.md"
+    last_reviewed: "2026-06-13"
+
+  ci_cd_infra:
+    name: "CI/CD & Infrastructure"
+    description: >
+      GitHub Actions workflows, Docker images, Kafka deployment config,
+      Prometheus / Grafana monitoring stack.
+    paths:
+      - ".github/**"
+      - "Dockerfile"
+      - "docker-compose.yml"
+      - "Makefile"
+      - "monitoring/**"
+    team: "@Ledger-Lenz/infra"
+    tech_lead: "@ledgerlens-infra-lead"
+    on_call: "@ledgerlens-infra-lead"
+    risk: high
+    slo:
+      availability: "99.0%"
+      latency_p99_ms: null
+    escalation:
+      - level: 1
+        contact: "@ledgerlens-infra-lead"
+        after_minutes: 30
+      - level: 2
+        contact: "@ledgerlens-maintainer"
+        after_minutes: 120
+    runbook: "docs/monitoring.md"
+    last_reviewed: "2026-06-13"
+
+  drift_retraining:
+    name: "Drift Detection & Continuous Retraining"
+    description: >
+      PSI-based feature drift detection, automated model retraining trigger,
+      model version archival, and promotion gate (AUC-ROC / F1 tolerance).
+    paths:
+      - "detection/drift_monitor.py"
+      - "scripts/retrain_if_drifted.py"
+      - "scripts/list_model_versions.py"
+      - ".github/workflows/retrain.yml"
+    team: "@Ledger-Lenz/ml-core"
+    tech_lead: "@ledgerlens-ml-lead"
+    on_call: "@ledgerlens-ml-lead"
+    risk: high
+    slo:
+      availability: "99.0%"
+      latency_p99_ms: null
+    escalation:
+      - level: 1
+        contact: "@ledgerlens-ml-lead"
+        after_minutes: 60
+      - level: 2
+        contact: "@ledgerlens-maintainer"
+        after_minutes: 240
+    runbook: "docs/drift_detection.md"
+    last_reviewed: "2026-06-13"
+
+  forensic_reporting:
+    name: "Forensic & Compliance Reporting"
+    description: >
+      Tamper-evident forensic report generation, FATF Travel Rule exporter,
+      SAR-supporting output, and on-chain anchoring via Soroban.
+    paths:
+      - "detection/forensic_report.py"
+      - "detection/forensic_report_interactive.py"
+      - "detection/audit_trail.py"
+      - "reporting/**"
+      - "scripts/generate_reports.py"
+      - "scripts/score_wallet.py"
+    team: "@Ledger-Lenz/maintainers"
+    tech_lead: "@ledgerlens-maintainer"
+    on_call: "@ledgerlens-maintainer"
+    risk: high
+    slo:
+      availability: "99.0%"
+      latency_p99_ms: 2000
+    escalation:
+      - level: 1
+        contact: "@ledgerlens-maintainer"
+        after_minutes: 30
+      - level: 2
+        contact: "@ledgerlens-security-lead"
+        after_minutes: 120
+    runbook: "docs/forensic_reporting.md"
+    last_reviewed: "2026-06-13"

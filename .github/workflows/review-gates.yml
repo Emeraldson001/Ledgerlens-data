@@ -1,0 +1,82 @@
+name: Review Gates
+
+# Separate from ci.yml on purpose: this must re-evaluate when the pull-request
+# *description* changes, which needs the `edited` event. Adding `edited` to
+# ci.yml's shared trigger would re-run the 3.11/3.12 test matrix, the notebook
+# execution, and mutation testing on every description tweak.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review-gates:
+    name: High-risk path acknowledgement
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need the base branch to diff against.
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Collect changed paths
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
+          git diff --name-only "origin/$BASE_REF"...HEAD > changed_paths.txt
+          echo "Changed paths:"
+          cat changed_paths.txt
+
+      - name: Write PR body to a file
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: printf '%s' "$PR_BODY" > pr_body.md
+
+      - name: Check review gates
+        id: gates
+        run: |
+          set +e
+          python scripts/check_review_gates.py \
+            --changed-paths-from changed_paths.txt \
+            --pr-body-file pr_body.md \
+            --report-file gate_report.md
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          set -e
+
+      - name: Comment the result on the PR
+        # Best-effort: a pull_request event from a fork receives a read-only
+        # token, so `gh pr comment` cannot post. The gate's verdict is carried
+        # by the exit code in the next step, not by this comment.
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [ -s gate_report.md ]; then
+            gh pr comment "$PR_NUMBER" --body-file gate_report.md || \
+              echo "Could not comment (expected for forked PRs) — relying on the exit code."
+          fi
+
+      - name: Enforce the verdict
+        run: |
+          code="${{ steps.gates.outputs.exit_code }}"
+          if [ "$code" != "0" ]; then
+            echo "Review gates failed (exit $code). See the report above."
+            exit "$code"
+          fi
+          echo "Review gates satisfied."

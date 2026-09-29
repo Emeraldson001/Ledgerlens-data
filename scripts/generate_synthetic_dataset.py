@@ -12,8 +12,11 @@ Usage:
     python -m scripts.generate_synthetic_dataset --profile AdaptiveAttacker --gan-rounds 5
 """
 
+from __future__ import annotations
+
 import argparse
 import sys
+from importlib import import_module
 from typing import TextIO
 
 import numpy as np
@@ -275,12 +278,52 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def recompute_asset_class_baselines(df: pd.DataFrame) -> None:
+    """Recompute per-asset-class Benford baselines from clean-labelled rows.
+
+    Called as a post-step after dataset generation so the AssetClassifier
+    singleton reflects the current synthetic dataset distribution (issue #279).
+    The fitted baselines are stored on the module-level classifier and used
+    by subsequent ``compute_benford_metrics`` calls in the same process.
+
+    The synthetic dataset uses feature-level generation and does not include
+    raw trade amounts, so this function generates representative trade amounts
+    per asset class using the same distributional assumptions as the simulator.
+    """
+    from detection.benford_engine import get_asset_classifier
+
+    if "label" not in df.columns:
+        return
+
+    classifier = get_asset_classifier()
+
+    rng = np.random.default_rng(0)
+    n_clean = max(int((df["label"] == 0).sum()), 200)
+
+    # Build a synthetic labelled trade frame with asset_code annotations so
+    # fit_from_clean_trades can group by asset class.
+    stablecoins = list(classifier._stablecoins) or ["USDC"]
+    volatile = ["XLM"]
+
+    records = []
+    # Stablecoin amounts: cluster around round numbers (convention)
+    for amount in [100.0, 500.0, 1000.0, 5000.0, 10000.0] * (n_clean // 5 + 1):
+        records.append({"amount": amount, "asset_code": stablecoins[0], "label": 0})
+    # Volatile amounts: log-uniform (Benford-conforming)
+    for amount in 10 ** rng.uniform(0, 4, size=n_clean):
+        records.append({"amount": float(amount), "asset_code": volatile[0], "label": 0})
+
+    labelled = pd.DataFrame(records)
+    classifier.fit_from_clean_trades(labelled)
+
+
 def main() -> None:
     args = parse_args()
 
     if args.gan_rounds > 0:
-        from scripts.adversarial_training_loop import run_adversarial_loop
-
+        run_adversarial_loop = import_module(
+            "scripts.adversarial_training_loop"
+        ).run_adversarial_loop
         run_adversarial_loop(
             gan_rounds=args.gan_rounds,
             n_wallets=args.n_wallets,
@@ -296,9 +339,52 @@ def main() -> None:
         profile=args.profile,
         model_path=args.model_path,
     )
+
+    # Post-step: recompute asset-class-aware Benford baselines (issue #279)
+    recompute_asset_class_baselines(df)
+
     df.to_parquet(args.output)
     print(f"Wrote {len(df)} rows to {args.output}")
-    if not args.quiet:
+
+    try:
+        from data.lineage import LineageNodeType, LineageTracker
+
+        tracker = LineageTracker(graph_name="synthetic_dataset_generation")
+        node = tracker.register_dataset(
+            name="synthetic_dataset",
+            filepath=args.output,
+            node_type=(
+                LineageNodeType.GENERATED
+                if hasattr(LineageNodeType, "GENERATED")
+                else LineageNodeType.DERIVED_DATASET
+            ),
+            metadata={
+                "profile": args.profile,
+                "n_wallets": args.n_wallets,
+                "seed": args.seed,
+                "wash_offset": args.wash_offset,
+                "wash_noise": args.wash_noise,
+            },
+            row_count=len(df),
+            columns=list(df.columns),
+        )
+        tracker.add_transformation_step(
+            node_id=node.node_id,
+            step_name="generate_synthetic_dataset",
+            transform_type="simulation",
+            parameters={"profile": args.profile, "seed": args.seed},
+        )
+        sidecar = tracker.save_sidecar(args.output)
+        quiet = getattr(args, "quiet", False)
+        if not quiet:
+            print(f"Wrote lineage sidecar to {sidecar}")
+    except Exception as err:
+        quiet = getattr(args, "quiet", False)
+        if not quiet:
+            print(f"Lineage sidecar warning: {err}")
+
+    quiet = getattr(args, "quiet", False)
+    if not quiet:
         print_dataset_summary(df, profile=args.profile)
 
 

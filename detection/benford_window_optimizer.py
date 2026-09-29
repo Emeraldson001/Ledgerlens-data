@@ -1,17 +1,128 @@
-"""Adaptive Per-Asset Benford Window Selection via Bayesian Optimization."""
+"""Adaptive Per-Asset Benford Window Selection via Bayesian Optimization.
 
-import math
+Selects the optimal Benford window length for each asset pair at runtime based on
+trade volume density. For low-liquidity pairs, short windows produce noisy statistics.
+For high-frequency pairs, longer windows may mask recent manipulation.
+
+This module provides:
+  - `select_optimal_window()`: picks the shortest window whose trade count exceeds
+    a configurable threshold, with fallback to the longest window if none qualify.
+
+Insufficient-data fallback: when a pair has too few trades for any window to reach
+`min_sample_size` -- including a brand-new pair with zero trades everywhere -- no
+window is chosen on noise. `select_optimal_window()` degrades to the *longest*
+candidate window (720h when no candidates are supplied at all) and logs a warning,
+since the widest window is the one most likely to accumulate a usable sample.
+  - `optimize_windows_for_asset()`: offline Bayesian optimization of window schedules
+    per asset using labelled wash-trade data.
+"""
+
 import json
+import logging
+import math
 import os
+
 import numpy as np
 import pandas as pd
+from scipy.stats import norm
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import Matern
-from scipy.stats import norm
-from sklearn.metrics import precision_recall_curve, auc, f1_score
+from sklearn.metrics import auc, f1_score, precision_recall_curve
 
 from config import config
 from detection.benford_engine import mad_score
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Runtime Adaptive Window Selection (Issue #178)
+# ---------------------------------------------------------------------------
+
+
+def select_optimal_window(
+    pair_id: str,
+    trade_counts_per_window: dict[int, int],
+    min_sample_size: int | None = None,
+    candidate_windows: list[int] | None = None,
+) -> int:
+    """Select the optimal Benford window for a pair based on trade volume density.
+
+    Algorithm:
+      1. If provided, use the configured candidate windows; otherwise use all windows
+         in trade_counts_per_window.
+      2. Find the shortest window whose trade count >= min_sample_size.
+      3. If no window meets the threshold, fall back to the longest window and emit a warning.
+      4. Handle edge case of all-zero trade counts (new pair never seen) by returning
+         the longest window.
+
+    Parameters
+    ----------
+    pair_id:
+        Asset pair identifier (e.g. 'USDC:GA.../XLM:native'), used only for logging.
+    trade_counts_per_window:
+        Dict mapping window size in hours -> count of trades in that window.
+        Example: {1: 5, 4: 20, 24: 100, 168: 500, 720: 2000}
+    min_sample_size:
+        Minimum number of trades required for a window to be considered valid.
+        Defaults to config.BENFORD_MIN_SAMPLE_SIZE (default 50). Must be >= 10.
+    candidate_windows:
+        List of window sizes to consider (in hours). If omitted, uses sorted keys
+        of trade_counts_per_window.
+
+    Returns
+    -------
+    int:
+        The selected window size in hours. Guaranteed to be a key in either
+        trade_counts_per_window or candidate_windows.
+
+    Raises
+    ------
+    ValueError:
+        If min_sample_size < 10 (prevents trivially small samples).
+    """
+    if min_sample_size is None:
+        min_sample_size = getattr(config, "BENFORD_MIN_SAMPLE_SIZE", 50)
+
+    if min_sample_size < 10:
+        raise ValueError(
+            f"BENFORD_MIN_SAMPLE_SIZE must be >= 10, got {min_sample_size}. "
+            "Threshold below 10 produces trivially small samples."
+        )
+
+    # Determine candidate windows
+    if candidate_windows is None:
+        candidate_windows = sorted(trade_counts_per_window.keys())
+
+    # Edge case: all windows have zero trades (new pair never seen before)
+    if not candidate_windows or all(
+        trade_counts_per_window.get(w, 0) == 0 for w in candidate_windows
+    ):
+        logger.warning(
+            f"Pair {pair_id}: all candidate windows have zero trades. "
+            f"Falling back to longest window {max(candidate_windows or [1])}."
+        )
+        return max(candidate_windows) if candidate_windows else 720
+
+    # Find the shortest window that meets the minimum sample threshold
+    for window_hours in candidate_windows:
+        count = trade_counts_per_window.get(window_hours, 0)
+        if count >= min_sample_size:
+            logger.debug(
+                f"Pair {pair_id}: selected window {window_hours}h "
+                f"({count} trades >= {min_sample_size} threshold)."
+            )
+            return window_hours
+
+    # No window meets the threshold: fall back to the longest window
+    max_window = max(candidate_windows)
+    max_count = trade_counts_per_window.get(max_window, 0)
+    logger.warning(
+        f"Pair {pair_id}: no window meets minimum sample threshold ({min_sample_size}). "
+        f"Falling back to longest window {max_window}h ({max_count} trades). "
+        "Consider increasing BENFORD_MIN_SAMPLE_SIZE or monitoring pair liquidity."
+    )
+    return max_window
 
 
 def estimate_trades_per_hour(asset_trades: pd.DataFrame) -> float:
@@ -108,7 +219,10 @@ def optimize_windows_for_asset(
                 continue
 
             # Get trades involving wallet in this asset
-            w_trades = asset_trades[(asset_trades["base_account"] == wallet) | (asset_trades["counter_account"] == wallet)]
+            w_trades = asset_trades[
+                (asset_trades["base_account"] == wallet)
+                | (asset_trades["counter_account"] == wallet)
+            ]
             if w_trades.empty:
                 continue
 
@@ -123,7 +237,9 @@ def optimize_windows_for_asset(
             timestamps = pd.to_datetime(w_trades[time_col])
             ref = timestamps.max()
             window_start = ref - pd.Timedelta(hours=w)
-            window_amounts = w_trades.loc[(timestamps > window_start) & (timestamps <= ref), "amount"]
+            window_amounts = w_trades.loc[
+                (timestamps > window_start) & (timestamps <= ref), "amount"
+            ]
 
             # Minimum sample guard
             if len(window_amounts[window_amounts > 0]) < min_trades:
@@ -173,11 +289,7 @@ def optimize_windows_for_asset(
 
     # Bayesian Optimization Loop with Gaussian Process (GP) surrogate
     gp = GaussianProcessRegressor(
-        kernel=Matern(nu=2.5),
-        alpha=1e-6,
-        normalize_y=True,
-        n_restarts_optimizer=5,
-        random_state=42
+        kernel=Matern(nu=2.5), alpha=1e-6, normalize_y=True, n_restarts_optimizer=5, random_state=42
     )
 
     n_iters = min(n_iterations, len(candidates) - len(evaluated_indices))
@@ -217,7 +329,7 @@ def optimize_windows_for_asset(
     preds = gp.predict(X_all)
 
     # Select top 5 candidates with the highest GP predicted score
-    cand_preds = list(zip(candidates, preds))
+    cand_preds = list(zip(candidates, preds, strict=True))
     cand_preds.sort(key=lambda x: x[1], reverse=True)
 
     top_5 = [cand for cand, score in cand_preds[:5]]
@@ -236,6 +348,7 @@ def optimize_windows_for_asset(
 
 def main() -> None:
     import argparse
+
     parser = argparse.ArgumentParser(description="Offline Benford window optimization per asset")
     parser.add_argument("--trades", required=True, help="Path to raw trades Parquet file")
     parser.add_argument("--labelled", required=True, help="Path to labelled dataset Parquet file")
@@ -261,7 +374,9 @@ def main() -> None:
         asset_trades = trades_df[asset_mask]
 
         # Labelled dataset subset for wallets trading this asset
-        wallets_with_trades = set(pd.unique(asset_trades[["base_account", "counter_account"]].values.ravel()))
+        wallets_with_trades = set(
+            pd.unique(asset_trades[["base_account", "counter_account"]].values.ravel())
+        )
         asset_labelled_df = labelled_df[labelled_df["wallet"].isin(wallets_with_trades)]
 
         if len(asset_labelled_df) < 5:
@@ -283,12 +398,11 @@ def main() -> None:
         output_path = os.path.join(args.output_dir, f"{clean_name}_benford_windows.json")
 
         with open(output_path, "w") as f:
-            json.dump({
-                "asset": asset,
-                "windows": final_windows
-            }, f, indent=2)
+            json.dump({"asset": asset, "windows": final_windows}, f, indent=2)
 
-        print(f"Optimized window schedule for asset {asset}: {final_windows} -> Saved to {output_path}")
+        print(
+            f"Optimized window schedule for asset {asset}: {final_windows} -> Saved to {output_path}"
+        )
 
 
 if __name__ == "__main__":

@@ -9,25 +9,24 @@ Acceptance Criteria verified:
 
 import json
 import os
-import tempfile
+
+import networkx as nx
 import numpy as np
 import pandas as pd
-import networkx as nx
-import pytest
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import precision_score
 from sklearn.model_selection import train_test_split
 
 from detection.causal_discovery import WashTradeCausalDiscovery
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def make_linear_dag_data(n: int = 1500, seed: int = 42) -> pd.DataFrame:
     """Generate a 10-node linear chain X0 -> X1 -> ... -> X8 -> label.
-    
+
     Ground truth: the ONLY direct cause of 'label' is X8.
     """
     rng = np.random.default_rng(seed)
@@ -44,6 +43,7 @@ def make_feature_level_dataset(n_wallets: int = 500, seed: int = 42) -> pd.DataF
     """Generate a simple wash-trading feature dataset where several features
     have clear distributional differences between label 0 and 1."""
     from scripts.generate_synthetic_dataset import generate_synthetic_dataset
+
     return generate_synthetic_dataset(n_wallets=n_wallets, seed=seed)
 
 
@@ -108,26 +108,34 @@ class TestDAGAcyclicityAndDirectCauses:
     def test_dag_is_acyclic(self):
         """The networkx DiGraph produced must have no cycles."""
         df = make_feature_level_dataset(n_wallets=300, seed=7)
-        numeric_cols = [c for c in df.columns if c != "wallet" and pd.api.types.is_numeric_dtype(df[c])]
+        numeric_cols = [
+            c for c in df.columns if c != "wallet" and pd.api.types.is_numeric_dtype(df[c])
+        ]
         discoverer = WashTradeCausalDiscovery()
         dag = discoverer.fit(df[numeric_cols], alpha=0.05)
-        assert nx.is_directed_acyclic_graph(dag), "PC-produced causal DAG must be acyclic (no cycles)"
+        assert nx.is_directed_acyclic_graph(
+            dag
+        ), "PC-produced causal DAG must be acyclic (no cycles)"
 
     def test_direct_causes_of_label_leq_five(self):
         """The number of direct causes of 'label' in the DAG must be <= 5."""
         df = make_feature_level_dataset(n_wallets=300, seed=7)
-        numeric_cols = [c for c in df.columns if c != "wallet" and pd.api.types.is_numeric_dtype(df[c])]
+        numeric_cols = [
+            c for c in df.columns if c != "wallet" and pd.api.types.is_numeric_dtype(df[c])
+        ]
         discoverer = WashTradeCausalDiscovery()
         discoverer.fit(df[numeric_cols], alpha=0.05)
         causal_feats = discoverer.causal_features(label_name="label")
-        assert len(causal_feats) <= 5, (
-            f"Expected <= 5 direct causes of label, got {len(causal_feats)}: {causal_feats}"
-        )
+        assert (
+            len(causal_feats) <= 5
+        ), f"Expected <= 5 direct causes of label, got {len(causal_feats)}: {causal_feats}"
 
     def test_causal_features_returns_list(self):
         """causal_features() must return a list (possibly empty)."""
         df = make_feature_level_dataset(n_wallets=100, seed=99)
-        numeric_cols = [c for c in df.columns if c != "wallet" and pd.api.types.is_numeric_dtype(df[c])]
+        numeric_cols = [
+            c for c in df.columns if c != "wallet" and pd.api.types.is_numeric_dtype(df[c])
+        ]
         discoverer = WashTradeCausalDiscovery()
         discoverer.fit(df[numeric_cols], alpha=0.05)
         feats = discoverer.causal_features()
@@ -146,7 +154,7 @@ class TestDAGAcyclicityAndDirectCauses:
 
 class TestCausalFeaturePrecision:
     """AC3: Causal features improve precision by >= 2% used alone vs. all features.
-    
+
     Note: this test uses a clean linear synthetic dataset where causal signals
     are highly informative. The 2% threshold is met when the causal feature
     is a strong direct cause.
@@ -164,13 +172,9 @@ class TestCausalFeaturePrecision:
 
         X = df.drop(columns=["label"])
         y = df["label"]
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
-
-        # Model with all features (including noise)
-        model_all = RandomForestClassifier(n_estimators=50, random_state=42)
-        model_all.fit(X_train, y_train)
-        preds_all = model_all.predict(X_test)
-        prec_all = precision_score(y_test, preds_all, zero_division=0)
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y
+        )
 
         # Model with only X8 (the true causal feature)
         model_causal = RandomForestClassifier(n_estimators=50, random_state=42)
@@ -178,9 +182,10 @@ class TestCausalFeaturePrecision:
         preds_causal = model_causal.predict(X_test[["X8"]])
         prec_causal = precision_score(y_test, preds_causal, zero_division=0)
 
-        diff = prec_causal - prec_all
         # The causal feature should outperform or match features plus noise
-        assert prec_causal >= 0.80, f"Expected high precision with direct cause, got {prec_causal:.4f}"
+        assert (
+            prec_causal >= 0.80
+        ), f"Expected high precision with direct cause, got {prec_causal:.4f}"
 
     def test_noise_features_reduce_precision(self):
         """Adding noisy features typically does not improve precision over a direct cause."""
@@ -188,27 +193,27 @@ class TestCausalFeaturePrecision:
         n = 800
         x_cause = rng.standard_normal(n)
         label = (x_cause > 0).astype(int)
-        
+
         X_cause = x_cause.reshape(-1, 1)
         X_all = np.hstack([X_cause, rng.standard_normal((n, 30))])
-        
+
         X_c_train, X_c_test, y_train, y_test = train_test_split(
             X_cause, label, test_size=0.25, random_state=7, stratify=label
         )
-        X_a_train, X_a_test = X_all[:len(X_c_train)], X_all[len(X_c_train):]
-        
+        X_a_train, X_a_test = X_all[: len(X_c_train)], X_all[len(X_c_train) :]
+
         clf_causal = RandomForestClassifier(n_estimators=50, random_state=7)
         clf_causal.fit(X_c_train, y_train)
         prec_causal = precision_score(y_test, clf_causal.predict(X_c_test), zero_division=0)
-        
+
         clf_all = RandomForestClassifier(n_estimators=50, random_state=7)
         clf_all.fit(X_a_train, y_train)
         prec_all = precision_score(y_test, clf_all.predict(X_a_test), zero_division=0)
-        
+
         # Causal feature should match or exceed all-feature precision
-        assert prec_causal >= prec_all - 0.05, (
-            f"Causal precision {prec_causal:.4f} should be close to all-feature precision {prec_all:.4f}"
-        )
+        assert (
+            prec_causal >= prec_all - 0.05
+        ), f"Causal precision {prec_causal:.4f} should be close to all-feature precision {prec_all:.4f}"
 
 
 # ---------------------------------------------------------------------------
@@ -221,9 +226,9 @@ class TestDiscoverCausalStructureScript:
 
     def test_script_exists(self):
         """The script file must exist."""
-        assert os.path.exists("scripts/discover_causal_structure.py"), (
-            "scripts/discover_causal_structure.py must exist"
-        )
+        assert os.path.exists(
+            "scripts/discover_causal_structure.py"
+        ), "scripts/discover_causal_structure.py must exist"
 
     def test_script_runs_and_produces_image(self, tmp_path):
         """Running the script should produce the visualization image and JSON DAG."""
@@ -248,7 +253,9 @@ class TestDiscoverCausalStructureScript:
             text=True,
             timeout=120,
         )
-        assert result.returncode == 0, f"Script failed:\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+        assert (
+            result.returncode == 0
+        ), f"Script failed:\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         assert os.path.exists(img_output), f"Expected image file at {img_output}"
         assert os.path.exists(dag_output), f"Expected JSON DAG at {dag_output}"
 

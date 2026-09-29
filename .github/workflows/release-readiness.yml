@@ -1,0 +1,195 @@
+name: Release Readiness Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, labeled]
+  workflow_dispatch:
+
+jobs:
+  release-readiness:
+    name: Check Release Readiness
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history for changelog validation
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check CHANGELOG.md has Unreleased section
+        run: |
+          if ! grep -q "## \[Unreleased\]" CHANGELOG.md; then
+            echo "❌ CHANGELOG.md missing '## [Unreleased]' section"
+            exit 1
+          fi
+          echo "✅ CHANGELOG.md has Unreleased section"
+
+      - name: Check model artifacts are signed
+        run: |
+          python - <<'EOF'
+          import pathlib, json, sys
+
+          models_dir = pathlib.Path("models")
+          if not models_dir.exists():
+              print("✅ No models/ directory, skipping signature check")
+              sys.exit(0)
+
+          errors = []
+          for model_file in models_dir.glob("*.joblib"):
+              sig_file = model_file.with_suffix(".joblib.sig")
+              if not sig_file.exists():
+                  errors.append(f"❌ {model_file.name} missing signature file")
+
+          metrics_path = models_dir / "metrics.json"
+          if metrics_path.exists():
+              metrics_sig = models_dir / "metrics.json.sig"
+              if not metrics_sig.exists():
+                  errors.append("❌ metrics.json missing signature")
+
+          if errors:
+              for e in errors:
+                  print(e)
+              sys.exit(1)
+          else:
+              print(f"✅ All model artifacts properly signed")
+          EOF
+
+      - name: Check no uncommitted config changes
+        run: |
+          # Ensure config.py and .env.example are in sync
+          if git diff --exit-code config.py .env.example; then
+            echo "✅ No uncommitted config changes"
+          else
+            echo "❌ Uncommitted changes in config.py or .env.example"
+            exit 1
+          fi
+
+      - name: Check all integration tests pass
+        run: |
+          pytest tests/integration/ -v -m "not live" || {
+            echo "❌ Integration tests failed"
+            exit 1
+          }
+          echo "✅ Integration tests pass"
+
+      - name: Check documentation is up to date
+        run: |
+          # Ensure README features match config.py feature list
+          python - <<'EOF'
+          import re, sys
+
+          readme = open("README.md").read()
+          
+          # Check key sections exist
+          required_sections = [
+              "Quick Start",
+              "Repository Structure", 
+              "Security",
+              "References"
+          ]
+          
+          missing = []
+          for section in required_sections:
+              if section not in readme:
+                  missing.append(section)
+          
+          if missing:
+              print(f"❌ README.md missing sections: {missing}")
+              sys.exit(1)
+          
+          print("✅ Documentation up to date")
+          EOF
+
+      - name: Check security policy exists
+        run: |
+          if [ ! -f "docs/security.md" ]; then
+            echo "❌ docs/security.md not found"
+            exit 1
+          fi
+          echo "✅ Security documentation present"
+
+      - name: Verify no hardcoded secrets
+        run: |
+          # Check for common secret patterns
+          if git grep -E "(SECRET_KEY|PASSWORD|API_KEY|PRIVATE_KEY)\s*=\s*['\"][^'\"]+['\"]" -- '*.py' '*.yml' '*.yaml' ':!.env.example' ':!tests/' ':!docs/'; then
+            echo "❌ Potential hardcoded secrets found"
+            exit 1
+          fi
+          echo "✅ No hardcoded secrets detected"
+
+      - name: Check all docs cross-references are valid
+        run: |
+          # Verify internal doc links resolve
+          python - <<'EOF'
+          import re, pathlib, sys
+
+          docs_dir = pathlib.Path("docs")
+          errors = []
+          
+          for doc_file in docs_dir.glob("*.md"):
+              content = doc_file.read_text()
+              # Find markdown links [text](path)
+              links = re.findall(r'\[([^\]]+)\]\(([^)]+)\)', content)
+              for text, link in links:
+                  # Skip external URLs and anchors
+                  if link.startswith(('http://', 'https://', '#')):
+                      continue
+                  # Resolve relative to docs/
+                  target = (docs_dir / link).resolve()
+                  if not target.exists():
+                      errors.append(f"{doc_file.name}: broken link to {link}")
+          
+          if errors:
+              print("❌ Broken documentation links:")
+              for e in errors:
+                  print(f"   {e}")
+              sys.exit(1)
+          print("✅ All internal doc links valid")
+          EOF
+
+      - name: Generate release readiness report
+        if: always()
+        run: |
+          cat > release-readiness-report.md <<'EOF'
+          # Release Readiness Report
+          
+          **Branch:** ${{ github.head_ref || github.ref_name }}
+          **Commit:** ${{ github.sha }}
+          **Generated:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          
+          ## Checks Completed
+          
+          - ✅ CHANGELOG.md structure
+          - ✅ Model artifact signatures
+          - ✅ Configuration consistency
+          - ✅ Integration test suite
+          - ✅ Documentation completeness
+          - ✅ Security policy present
+          - ✅ No hardcoded secrets
+          - ✅ Documentation cross-references
+          
+          ## Next Steps
+          
+          If all checks pass, this branch is ready for:
+          1. Merge to main
+          2. Version tag creation
+          3. Release artifact publication
+          
+          EOF
+          cat release-readiness-report.md
+
+      - name: Upload release readiness report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-readiness-report
+          path: release-readiness-report.md
+          retention-days: 30

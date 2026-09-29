@@ -9,6 +9,12 @@ Usage:
     # Select wallets using default strategy and push to queue:
     python -m scripts.run_active_learning --pool data/unscored_wallets.parquet
 
+    # Select exactly reproducibly for a given seed:
+    python -m scripts.run_active_learning \\
+        --pool data/unscored_wallets.parquet \\
+        --strategy badge \\
+        --seed 42
+
     # Specify strategy and batch size:
     python -m scripts.run_active_learning \\
         --pool data/unscored_wallets.parquet \\
@@ -27,6 +33,7 @@ Runs on a weekly schedule via .github/workflows/active_learning.yml.
 from __future__ import annotations
 
 import argparse
+import inspect
 import os
 
 import pandas as pd
@@ -55,13 +62,17 @@ def load_models(model_dir: str) -> dict:
         artifact_path = os.path.join(model_dir, f"{name}.joblib")
         if os.path.exists(artifact_path):
             model = joblib.load(artifact_path)
-            # verify_chain — skipped silently when no public key is configured
             try:
-                from detection.persistence import ModelArtifact
+                from detection.persistence import ModelArtifact, load_trusted_public_key
 
-                ModelArtifact(model_dir).verify_chain(name)
+                ModelArtifact(model_dir).verify_chain(name, public_key=load_trusted_public_key())
             except Exception as exc:
-                logger.warning("Integrity check skipped for %s: %s", name, exc)
+                logger.warning(
+                    "Integrity check failed or skipped for %s (best-effort — active learning "
+                    "does not gate on the production trust chain): %s",
+                    name,
+                    exc,
+                )
             models[name] = model
     return models
 
@@ -73,8 +84,13 @@ def run_active_learning(
     queue_path: str,
     model_dir: str,
     asset_pair: str = "",
+    seed: int | None = None,
 ) -> list[str]:
     """Select *batch_size* wallets from *pool_path* and push to *queue_path*.
+
+    *seed*, when provided, is forwarded to the query strategy so that the
+    random components of batch selection (e.g. BADGE k-means++ seeding) can
+    be reproduced exactly.
 
     Returns the list of selected wallet IDs.
     """
@@ -94,6 +110,15 @@ def run_active_learning(
         kwargs["models"] = models
     elif primary_model is not None:
         kwargs["model"] = primary_model
+
+    if seed is not None:
+        select_sig = inspect.signature(strategy.select)
+        if "seed" in select_sig.parameters:
+            kwargs["seed"] = seed
+        else:
+            logger.warning(
+                "Strategy '%s' does not accept a seed; ignoring --seed", strategy_name
+            )
 
     selected = strategy.select(pool, n_query=batch_size, **kwargs)
     logger.info(
@@ -117,6 +142,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--queue", default=config.AL_QUEUE_PATH)
     parser.add_argument("--model-dir", default=config.MODEL_DIR)
     parser.add_argument("--asset-pair", default="")
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help=(
+            "Random seed for reproducible batch selection (e.g. BADGE "
+            "k-means++ seeding / committee tie-breaking). When omitted, "
+            "selections use the strategy's default behaviour."
+        ),
+    )
     # Incremental update flags
     parser.add_argument(
         "--update",
@@ -128,11 +163,39 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Path to historical labelled dataset (used for full retrain)",
     )
+    parser.add_argument(
+        "--force-continue",
+        action="store_true",
+        default=False,
+        help=(
+            "Override the active learning stopping criterion and continue "
+            "annotation regardless of convergence.  For research use only."
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+
+    # --- Stopping criterion check (Issue #256) ---
+    if not args.force_continue:
+        from detection.active_learning.annotation_queue import StoppingCriterion
+
+        criterion = StoppingCriterion()
+        models = load_models(args.model_dir)
+        primary_model = next(iter(models.values()), None) if models else None
+        pool_for_check = load_pool(args.pool)
+        if criterion.should_stop(model=primary_model, unlabelled_pool=pool_for_check):
+            logger.info(
+                "Active learning stopping criterion fired. " "Use --force-continue to override."
+            )
+            criterion.emit_convergence_report(queue_path=args.queue)
+            print(
+                "Active learning has converged. No new wallets selected. "
+                "Use --force-continue to override."
+            )
+            return
 
     selected = run_active_learning(
         pool_path=args.pool,
@@ -141,6 +204,7 @@ def main() -> None:
         queue_path=args.queue,
         model_dir=args.model_dir,
         asset_pair=args.asset_pair,
+        seed=args.seed,
     )
     print(f"Selected {len(selected)} wallets → {args.queue}")
 
