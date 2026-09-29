@@ -104,6 +104,45 @@ slow'` to exclude both):
   `ledgerlens-api`, `ledgerlens-contract`, `ledgerlens-dashboard`) can be
   updated.
 
+### API contract compatibility
+
+Any PR that touches `api/app.py` or anything under `contracts/` is gated by
+[`scripts/check_api_compatibility.py`](scripts/check_api_compatibility.py),
+which diffs the public API surface against the committed baseline and fails
+the build on a breaking change. The check runs in CI via
+[`.github/workflows/api-compatibility.yml`](.github/workflows/api-compatibility.yml)
+on every pull request that modifies those paths.
+
+Run it locally before opening such a PR:
+
+```bash
+python scripts/check_api_compatibility.py
+```
+
+#### Intentionally shipping a breaking change
+
+A breaking change is only allowed when it is deliberate and acknowledged:
+
+1. **Bump the API version.** Update the version constant in `api/app.py`
+   (and the matching entry in `contracts/`) so the new surface is published
+   under a new major/minor version.
+2. **Regenerate the baseline.** Re-run the checker with the update flag to
+   record the new contract as the accepted baseline:
+
+   ```bash
+   python scripts/check_api_compatibility.py --update-baseline
+   ```
+
+   Commit the regenerated baseline alongside the version bump so the CI gate
+   sees the change as acknowledged rather than accidental.
+3. **Notify downstream consumers.** Call out the break in the PR description
+   and in the `CHANGELOG.md` entry, and notify the consuming repos
+   (`ledgerlens-core`, `ledgerlens-api`, `ledgerlens-contract`,
+   `ledgerlens-dashboard`) so they can pin or migrate before the release.
+
+Without the version bump and regenerated baseline, the CI job fails and the
+PR cannot merge.
+
 ### Changelog entries
 
 Every PR that touches high-impact paths must include a `CHANGELOG.md` entry
@@ -203,65 +242,6 @@ make mutation-test
 
 # Run only and inspect results
 mutmut run \
-  --paths-to-mutate "detection/benford_engine.py,detection/feature_engineering.py,detection/model_inference.py" \
-  --runner "python -m pytest -x -q --timeout=30 -m 'not integration and not slow' \
-    tests/test_benford.py tests/test_benford_ci.py \
-    tests/test_feature_engineering.py tests/test_model_inference.py"
+  --paths-to-mutate "detection/benford_en
 
-# Show a summary of all mutation outcomes
-mutmut results
-
-# Check whether the score meets the 80% threshold
-python scripts/check_mutation_score.py --threshold 80
-```
-
-### Interpreting the results
-
-| Status | Meaning |
-|---|---|
-| `ok` | Mutation **killed** — at least one test caught the change ✓ |
-| `survived` | Mutation **survived** — the test suite didn't detect the logic error ✗ |
-| `suspicious` | Tests passed but with timing/output differences — treated as killed |
-| `timeout` | Test run timed out — treated as killed |
-| `ba_error` | mutmut could not apply the mutation — excluded from the score |
-
-The **mutation score** is `killed / (killed + survived) × 100`. The CI step
-fails when this drops below 80%.
-
-### Investigating surviving mutations
-
-```bash
-# Show the diff for a specific surviving mutation (ID from `mutmut results`)
-mutmut show <ID>
-
-# Apply the mutation locally, run tests manually, then restore
-mutmut apply <ID>
-pytest tests/test_benford.py -v    # add a test that catches this case
-mutmut unapply <ID>
-
-# Re-run only the surviving mutations (much faster after fixing tests)
-mutmut rerun
-```
-
-### Which mutation operators matter most for a fraud-detection ML pipeline
-
-1. **Relational operators** (`>` ↔ `>=`, `<` ↔ `<=`): threshold comparisons in
-   `bft_trimmed_mean`, `_has_consensus`, `MAD_NONCONFORMITY_THRESHOLD`, and
-   `ML_FLAG_THRESHOLD` are the highest-risk off-by-one sites.
-2. **Arithmetic operators** (`+` ↔ `-`, `*` ↔ `/`): the chi-square and Z-score
-   formulas in `benford_engine.py` contain squared differences and
-   square-root normalisation that silently produce wrong scores when mutated.
-3. **Boolean literals and conditions** (`True`/`False` flips, `and`/`or` swaps):
-   the `diverged`, `consensus_failure`, and `benford_flag` guards must be
-   tested explicitly with boundary-value inputs.
-4. **Return values** (mutating the returned constant 0.0, 1.0, etc.): empty-input
-   fallback paths in feature functions often return sentinel zeros that tests
-   must assert are *exactly* zero, not just non-negative.
-
-### Security note
-
-mutmut applies mutations in-process using Python AST manipulation and
-restores the original file after every test run. **Mutated code is never
-committed, never persisted to `models/`, and never reaches the network.**
-The CI job runs in a dedicated `mutation-test` job isolated from the
-regular `test` matrix.
+/* … truncated 2671 chars — edit only what you need near the top … */
