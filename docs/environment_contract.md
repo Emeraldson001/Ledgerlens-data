@@ -23,6 +23,7 @@ Auto-generated from `config.py` by `scripts/generate_env_contract_docs.py` (Issu
 | `CROSS_PAIR_SYNCHRONY_WINDOW_SECONDS` | `CROSS_PAIR_SYNCHRONY_WINDOW_SECONDS` | `int` | No | `'30'` | — |
 | `ALERT_DEDUP_WINDOW_SECONDS` | `ALERT_DEDUP_WINDOW_SECONDS` | `int` | No | `'60'` | Silence window for correlated alert deduplication (alerts/deduplicator.py). |
 | `RISK_SCORE_FLAG_THRESHOLD` | `RISK_SCORE_FLAG_THRESHOLD` | `int` | No | `'70'` | — |
+| `MAD_NONCONFORMITY_THRESHOLD` | `MAD_NONCONFORMITY_THRESHOLD` | `float` | No | `'0.015'` | Benford MAD above this sets benford_flag = true (Nigrini, 2012). |
 | `THRESHOLD_RL_PINNED` | `THRESHOLD_RL_PINNED` | `int` | No | `'0'` | Set to a non-zero integer to pin the alert threshold and disable the RL agent. E.g. THRESHOLD_RL_PINNED=75 → agent is bypassed, threshold is fixed at 75. |
 | `RISK_SCORE_DB_URL` | `RISK_SCORE_DB_URL` | `str` | No | `'sqlite:///ledgerlens.db'` | — |
 | `DB_POOL_SIZE` | `DB_POOL_SIZE` | `int` | No | `'5'` | Database connection pooling |
@@ -81,10 +82,16 @@ Auto-generated from `config.py` by `scripts/generate_env_contract_docs.py` (Issu
 | `WS_REPLAY_BUFFER_SIZE` | `WS_REPLAY_BUFFER_SIZE` | `int` | No | `'1000'` | — |
 | `WS_RATE_LIMIT_MSGS_PER_SECOND` | `WS_RATE_LIMIT_MSGS_PER_SECOND` | `int` | No | `'100'` | — |
 | `WS_HEARTBEAT_INTERVAL_SECONDS` | `WS_HEARTBEAT_INTERVAL_SECONDS` | `float` | No | `'30'` | Seconds between WebSocket ping frames sent to each client. If the client does not respond with a pong within this interval, the connection is closed and the subscriber entry is cleaned up. |
+| `WS_SLOW_CONSUMER_POLICY` | `WS_SLOW_CONSUMER_POLICY` | `str` | No | `'drop_oldest'` | Slow-consumer policy when a client's outbound queue is full (issue #893): "drop_oldest" (default) or "disconnect". Under drop_oldest, a client that drops more than WS_SLOW_CONSUMER_MAX_DROPS messages is disconnected (0 = never). |
+| `WS_SLOW_CONSUMER_MAX_DROPS` | `WS_SLOW_CONSUMER_MAX_DROPS` | `int` | No | `'0'` | — |
+| `WS_TOKEN_EXPIRY_GRACE_SECONDS` | `WS_TOKEN_EXPIRY_GRACE_SECONDS` | `float` | No | `'0'` | In-band token refresh (issue #894): seconds of grace after token expiry before the connection is force-closed with code 4001. |
 | `WS_ABUSE_MAX_REQUESTS_PER_MINUTE` | `WS_ABUSE_MAX_REQUESTS_PER_MINUTE` | `int` | No | `'300'` | WebSocket abuse detection (issue #223) |
 | `WS_ABUSE_MAX_DISTINCT_WALLETS` | `WS_ABUSE_MAX_DISTINCT_WALLETS` | `int` | No | `'50'` | — |
 | `WS_ABUSE_WALLET_WINDOW_SECONDS` | `WS_ABUSE_WALLET_WINDOW_SECONDS` | `int` | No | `'60'` | — |
 | `WS_ABUSE_BLOCK_DURATION_SECONDS` | `WS_ABUSE_BLOCK_DURATION_SECONDS` | `int` | No | `'300'` | — |
+| `WS_ABUSE_MAX_REPUTATION_MULTIPLIER` | `WS_ABUSE_MAX_REPUTATION_MULTIPLIER` | `float` | No | `'3.0'` | Reputation-based adaptive rate limit (issue #895) |
+| `WS_ABUSE_NEW_CLIENT_MULTIPLIER` | `WS_ABUSE_NEW_CLIENT_MULTIPLIER` | `float` | No | `'1.0'` | — |
+| `WS_ABUSE_REPUTATION_HALF_LIFE_SECONDS` | `WS_ABUSE_REPUTATION_HALF_LIFE_SECONDS` | `float` | No | `'3600'` | — |
 | `DP_TARGET_EPSILON` | `DP_TARGET_EPSILON` | `float` | No | `'8.0'` | Differentially private neural training (DP-SGD via Opacus) |
 | `DP_TARGET_DELTA` | `DP_TARGET_DELTA` | `float` | No | `'1e-5'` | — |
 | `DP_MAX_GRAD_NORM` | `DP_MAX_GRAD_NORM` | `float` | No | `'1.0'` | — |

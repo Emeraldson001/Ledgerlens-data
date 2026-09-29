@@ -222,6 +222,14 @@ class Config:
     # If the client does not respond with a pong within this interval,
     # the connection is closed and the subscriber entry is cleaned up.
     WS_HEARTBEAT_INTERVAL_SECONDS: float = float(os.getenv("WS_HEARTBEAT_INTERVAL_SECONDS", "30"))
+    # Slow-consumer policy when a client's outbound queue is full (issue #893):
+    # "drop_oldest" (default) or "disconnect". Under drop_oldest, a client that
+    # drops more than WS_SLOW_CONSUMER_MAX_DROPS messages is disconnected (0 = never).
+    WS_SLOW_CONSUMER_POLICY: str = os.getenv("WS_SLOW_CONSUMER_POLICY", "drop_oldest")
+    WS_SLOW_CONSUMER_MAX_DROPS: int = int(os.getenv("WS_SLOW_CONSUMER_MAX_DROPS", "0"))
+    # In-band token refresh (issue #894): seconds of grace after token expiry
+    # before the connection is force-closed with code 4001.
+    WS_TOKEN_EXPIRY_GRACE_SECONDS: float = float(os.getenv("WS_TOKEN_EXPIRY_GRACE_SECONDS", "0"))
 
     # WebSocket abuse detection (issue #223)
     WS_ABUSE_MAX_REQUESTS_PER_MINUTE: int = int(
@@ -230,6 +238,14 @@ class Config:
     WS_ABUSE_MAX_DISTINCT_WALLETS: int = int(os.getenv("WS_ABUSE_MAX_DISTINCT_WALLETS", "50"))
     WS_ABUSE_WALLET_WINDOW_SECONDS: int = int(os.getenv("WS_ABUSE_WALLET_WINDOW_SECONDS", "60"))
     WS_ABUSE_BLOCK_DURATION_SECONDS: int = int(os.getenv("WS_ABUSE_BLOCK_DURATION_SECONDS", "300"))
+    # Reputation-based adaptive rate limit (issue #895)
+    WS_ABUSE_MAX_REPUTATION_MULTIPLIER: float = float(
+        os.getenv("WS_ABUSE_MAX_REPUTATION_MULTIPLIER", "3.0")
+    )
+    WS_ABUSE_NEW_CLIENT_MULTIPLIER: float = float(os.getenv("WS_ABUSE_NEW_CLIENT_MULTIPLIER", "1.0"))
+    WS_ABUSE_REPUTATION_HALF_LIFE_SECONDS: float = float(
+        os.getenv("WS_ABUSE_REPUTATION_HALF_LIFE_SECONDS", "3600")
+    )
 
     # Differentially private neural training (DP-SGD via Opacus)
     DP_TARGET_EPSILON: float = float(os.getenv("DP_TARGET_EPSILON", "8.0"))
