@@ -512,3 +512,23 @@ A: No, replay uses no-op dispatcher. Live alerts continue unaffected.
 - [Risk Score Store](../detection/risk_score_store.py) - DB schema and queries
 - [Feature Engineering](../detection/feature_engineering.py) - Feature computation
 
+
+## Recovery: Horizon history pruned after extended downtime (Issue #904)
+
+**Symptom:** `CRITICAL HORIZON_HISTORY_GAP pair=... watermark=... oldest_available=...`
+in the ingestion logs on startup.
+
+**What happens automatically:** `stream_trades(..., watermark_tracker=...)`
+detected that the pair's committed watermark is older than the oldest trade the
+queried Horizon node retains. It backfills the gap via
+`historical_loader.load_trades` from `HORIZON_HISTORY_URL` (falls back to
+`HORIZON_URL`), skipping any trade at or before the watermark, advancing the
+watermark as it goes, then resumes live streaming.
+
+**Operator steps:**
+1. Ensure `HORIZON_HISTORY_URL` points at a full-history Horizon node; if unset,
+   the backfill may itself be incomplete.
+2. Confirm the watermark advanced past `oldest_available` (`WatermarkTracker.summary()`).
+3. If no full-history node was available, record the unrecoverable range as a
+   known data gap and notify downstream consumers (scores for affected wallets
+   were computed on partial history).

@@ -44,6 +44,8 @@ def _parse_pool_ids(raw: str) -> list[str]:
 
 class Config:
     HORIZON_URL: str = os.getenv("HORIZON_URL", "https://horizon.stellar.org")
+    # Full-history Horizon node used to backfill pruned ranges on resume (#904).
+    HORIZON_HISTORY_URL: str = os.getenv("HORIZON_HISTORY_URL", "")
     STELLAR_NETWORK: str = os.getenv("STELLAR_NETWORK", "PUBLIC")
     LOG_FORMAT: str = os.getenv("LOG_FORMAT", "json").lower()
 
@@ -58,6 +60,10 @@ class Config:
     BENFORD_WINDOWS_HOURS: list[int] = _parse_int_list(
         os.getenv("BENFORD_WINDOWS_HOURS", "1,4,24,168,720")
     )
+
+    # Hard cap on wallets held in streaming.FeatureBuffer; LRU-evicted beyond
+    # this (Issue #901). 0 disables the bound.
+    FEATURE_BUFFER_MAX_WALLETS: int = int(os.getenv("FEATURE_BUFFER_MAX_WALLETS", "100000"))
 
     ASSET_BENFORD_WINDOWS: dict[str, list[int]] = {}
 
