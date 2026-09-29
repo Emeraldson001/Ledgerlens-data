@@ -17,6 +17,16 @@ within that window returns the original stored response verbatim and does
 timeout cannot produce a duplicate write. Keys are scoped per authenticated
 tenant. After the TTL expires the key is forgotten and a subsequent request
 with the same key is treated as a new write.
+
+Request-cost accounting
+-----------------------
+Expensive endpoints (forensic report generation, backtests) declare a
+per-request cost estimate. Costs are accumulated against a per-tenant budget
+(``config.API_TENANT_COST_BUDGET``) over a rolling window. When a tenant
+exceeds its budget the request is rejected with HTTP 429 and a ``Retry-After``
+header indicating when budget will be available again, rather than queuing
+indefinitely or degrading other tenants. Per-tenant consumption is exposed via
+``_cost_accountant.metrics()``.
 """
 
 import re
@@ -26,6 +36,7 @@ from contextlib import asynccontextmanager
 
 import bcrypt
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Security
+from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -196,118 +207,134 @@ class TenantRateLimiter:
 _tenant_limiter = TenantRateLimiter(default_rpm=config.API_RATE_LIMIT_RPM)
 
 
+# ---------------------------------------------------------------------------
+# Request-cost accounting for expensive endpoints
+# ---------------------------------------------------------------------------
+# Expensive endpoints (forensic report generation, backtests) declare a
+# per-request cost estimate. Costs accumulate against a per-tenant budget over
+# a rolling window. When a tenant exhausts its budget the request is rejected
+# with HTTP 429 and a ``Retry-After`` header, so a single tenant cannot
+# monopolize shared compute or degrade other tenants.
+
+# Cost estimates (in abstract "cost units") per expensive operation. These are
+# calibrated from observed downstream work: a forensic report fans out across
+# the full score history and SHAP explanations, while a backtest replays a
+# window of scores. Values are intentionally coarse and documented here so the
+# methodology is auditable.
+COST_FORENSIC_REPORT = 25.0
+COST_BACKTEST = 10.0
+
+
+class QuotaExceeded(Exception):
+    """Raised when a tenant's request-cost budget is exhausted."""
+
+    def __init__(self, tenant_id: str, retry_after: int) -> None:
+        self.tenant_id = tenant_id
+        self.retry_after = max(1, int(retry_after))
+        super().__init__(
+            f"Request-cost quota exceeded for tenant {tenant_id!r}; "
+            f"retry after {self.retry_after}s"
+        )
+
+
+class RequestCostAccountant:
+    """Per-tenant request-cost budget with isolated state per tenant.
+
+    Each tenant has an independent rolling window of accumulated cost. A
+    request is admitted only if ``accumulated + cost <= budget``. When the
+    budget is exhausted the caller receives a ``QuotaExceeded`` carrying
+    retry-after guidance derived from the window length.
+    """
+
+    def __init__(self, budget: float, window_seconds: float) -> None:
+        self._budget = float(budget)
+        self._window = float(window_seconds)
+        # tenant_id -> (window_start_monotonic, accumulated_cost)
+        self._state: dict[str, list] = {}
+        self._lock = threading.Lock()
+        # Metrics: per-tenant consumption + rejection counters.
+        self._consumed: dict[str, float] = {}
+        self._rejected: dict[str, int] = {}
+
+    def _budget_for(self, tenant_id: str) -> float:
+        """Resolve the effective budget for a tenant (override or default)."""
+        try:
+            from config.tenant_config import get_tenant_config
+
+            tenant = get_tenant_config(tenant_id)
+            override = getattr(tenant, "cost_budget", None)
+            if override:
+                return float(override)
+        except Exception:
+            # Unknown tenant or config unavailable: fall back to default.
+            pass
+        return self._budget
+
+    def _roll(self, tenant_id: str, now: float) -> list:
+        state = self._state.get(tenant_id)
+        if state is None or now - state[0] >= self._window:
+            state = [now, 0.0]
+            self._state[tenant_id] = state
+        return state
+
+    def charge(self, tenant_id: str, cost: float) -> None:
+        """Charge ``cost`` to ``tenant_id`` or raise ``QuotaExceeded``."""
+        now = time.monotonic()
+        with self._lock:
+            state = self._roll(tenant_id, now)
+            budget = self._budget_for(tenant_id)
+            if state[1] + cost > budget:
+                self._rejected[tenant_id] = self._rejected.get(tenant_id, 0) + 1
+                retry_after = self._window - (now - state[0])
+                raise QuotaExceeded(tenant_id, retry_after)
+            state[1] += cost
+            self._consumed[tenant_id] = self._consumed.get(tenant_id, 0.0) + cost
+        logger.info(
+            "request cost charged",
+            extra={"tenant_id": tenant_id, "cost": cost},
+        )
+
+    def metrics(self) -> dict:
+        """Snapshot of per-tenant cost consumption and rejections."""
+        with self._lock:
+            tenants = set(self._state) | set(self._consumed) | set(self._rejected)
+            return {
+                "tenants": {
+                    tid: {
+                        "consumed": self._consumed.get(tid, 0.0),
+                        "budget": self._budget_for(tid),
+                        "rejected": self._rejected.get(tid, 0),
+                    }
+                    for tid in tenants
+                }
+            }
+
+
+_cost_accountant = RequestCostAccountant(
+    budget=getattr(config, "API_TENANT_COST_BUDGET", 1000.0),
+    window_seconds=getattr(config, "API_TENANT_COST_WINDOW_SECONDS", 3600.0),
+)
+
+
+def _charge_request_cost(tenant_id: str, cost: float) -> None:
+    """Charge ``cost`` to ``tenant_id``, translating quota errors to HTTP 429."""
+    try:
+        _cost_accountant.charge(tenant_id, cost)
+    except QuotaExceeded as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                "Request-cost quota exceeded for this tenant. "
+                f"Retry after {exc.retry_after} seconds."
+            ),
+            headers={"Retry-After": str(exc.retry_after)},
+        ) from exc
+
+
 def _tenant_id_from_key(api_key: str) -> str:
     """Derive a stable tenant identity from the authenticated API key.
 
     The raw key is never used as a bucket key; a short digest keeps limiter
-    state keyed on authenticated identity without storing secrets.
-    """
-    import hashlib
+    state
 
-    return hashlib.sha256(api_key.encode()).hexdigest()[:16]
-
-
-def _enforce_tenant_limit(api_key: str) -> None:
-    """Apply the per-tenant limit, raising 429 when the bucket is empty."""
-    tenant_id = _tenant_id_from_key(api_key)
-    if not _tenant_limiter.check(tenant_id):
-        raise HTTPException(
-            status_code=429,
-            detail="Per-tenant rate limit exceeded",
-            headers={"Retry-After": "1"},
-        )
-
-
-# ---------------------------------------------------------------------------
-# Idempotency-key support for write endpoints
-# ---------------------------------------------------------------------------
-# Mirrors the dedupe-within-a-TTL-window pattern used in
-# ``pipeline/idempotency.py``: a key is remembered for a configurable window
-# and a duplicate request replays the original stored response instead of
-# reprocessing the write. State is scoped per authenticated tenant so one
-# tenant's keys can never collide with or observe another tenant's writes.
-
-
-class IdempotencyStore:
-    """Thread-safe, TTL-bounded store of responses keyed by idempotency key."""
-
-    def __init__(self, ttl_seconds: float) -> None:
-        self._ttl = float(ttl_seconds)
-        # (tenant_id, key) -> (expires_at, status_code, response_body)
-        self._entries: dict[tuple[str, str], tuple[float, int, dict]] = {}
-        self._lock = threading.Lock()
-
-    def _purge_expired(self, now: float) -> None:
-        expired = [k for k, (exp, _, _) in self._entries.items() if exp <= now]
-        for k in expired:
-            self._entries.pop(k, None)
-
-    def get(self, tenant_id: str, key: str) -> tuple[int, dict] | None:
-        """Return the stored ``(status_code, body)`` for a live key, else None."""
-        now = time.monotonic()
-        with self._lock:
-            self._purge_expired(now)
-            entry = self._entries.get((tenant_id, key))
-            if entry is None:
-                return None
-            _, status_code, body = entry
-            return status_code, body
-
-    def put(self, tenant_id: str, key: str, status_code: int, body: dict) -> None:
-        """Store a response for ``key`` until the TTL window elapses."""
-        now = time.monotonic()
-        with self._lock:
-            self._purge_expired(now)
-            self._entries[(tenant_id, key)] = (now + self._ttl, status_code, body)
-
-
-_idempotency_store = IdempotencyStore(
-    ttl_seconds=getattr(config, "API_IDEMPOTENCY_TTL_SECONDS", 86400)
-)
-
-
-def _resolve_idempotency_key(request: Request, body: BaseModel | None) -> str | None:
-    """Extract an idempotency key from the header or the request body field."""
-    key = request.headers.get("Idempotency-Key")
-    if not key and body is not None:
-        key = getattr(body, "idempotency_key", None)
-    if key is not None:
-        key = str(key).strip()
-        if not key:
-            return None
-    return key
-
-
-def _replay_if_duplicate(api_key: str, key: str | None):
-    """Return the stored response for a duplicate key, else None."""
-    if not key:
-        return None
-    tenant_id = _tenant_id_from_key(api_key)
-    stored = _idempotency_store.get(tenant_id, key)
-    if stored is None:
-        return None
-    status_code, body = stored
-    logger.info(
-        "idempotent replay",
-        extra={"tenant_id": tenant_id, "idempotency_key": key},
-    )
-    from fastapi.responses import JSONResponse
-
-    return JSONResponse(status_code=status_code, content=body)
-
-
-def _remember_response(api_key: str, key: str | None, status_code: int, body: dict) -> None:
-    """Persist a response so a later duplicate key can replay it."""
-    if not key:
-        return
-    tenant_id = _tenant_id_from_key(api_key)
-    _idempotency_store.put(tenant_id, key, status_code, body)
-
-
-@asynccontextmanager
-async def _lifespan(app: FastAPI):
-    # Fail fast on a missing/misconfigured var (e.g. no API_KEYS, meaning
-    # every request would 401 forever) instead of discovering it from the
-    # first reque
-
-/* … truncated 5791 chars — edit only what you need near the top … */
+/* … truncated 4133 chars — edit only what you need near the top … */
