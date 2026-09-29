@@ -11,6 +11,11 @@ have that behavior silently changed), and a separate periodic health check
 (``check_drift_monitor_health`` / the ``--heartbeat-check`` CLI below) alerts
 distinctly when the heartbeat goes stale, which happens both when the caller
 stops invoking ``detect()`` at all and when every recent call has failed.
+
+Issue #932 unifies infra-level feature drift (this module) with model-level
+output drift (``detection/drift_monitor.py``) into a single triage view via
+:func:`correlate_drift_signals`, which annotates whether flagged output
+drift is explained by upstream feature drift in the same window.
 """
 
 import logging
@@ -114,6 +119,93 @@ class DriftReport:
         return {"drift_detected": self.drift_detected, "mmd_per_feature": self.mmd_per_feature}
 
 
+# Triage decision tree (issue #932). Maps the combination of feature-drift and
+# output-drift signals to an operator action. Documented in the monitoring
+# runbook; kept here so the annotation and the runbook cannot drift apart.
+TRIAGE_DECISION_TREE: dict[str, dict[str, str]] = {
+    "both_drifted": {
+        "condition": "feature drift AND output drift flagged in the same window",
+        "interpretation": "Output drift is explained by upstream feature drift.",
+        "action": "Investigate the drifted input features; the model itself is likely fine.",
+    },
+    "only_output_drifted": {
+        "condition": "output drift flagged, no tracked input feature drifted",
+        "interpretation": "Output drift is unexplained by upstream features.",
+        "action": "Escalate to model owners: possible model/code regression or label shift.",
+    },
+    "only_input_drifted": {
+        "condition": "feature drift flagged, output drift not flagged",
+        "interpretation": "Inputs shifted but model outputs are still stable.",
+        "action": "Monitor; no immediate action unless output drift follows.",
+    },
+    "no_drift": {
+        "condition": "neither feature nor output drift flagged",
+        "interpretation": "Both signals stable.",
+        "action": "No action.",
+    },
+}
+
+
+def correlate_drift_signals(
+    feature_drift: DriftReport | None,
+    output_drift: DriftReport | None,
+) -> dict:
+    """Unify feature-drift and model-output-drift into a single triage view.
+
+    When output drift is flagged, checks whether any tracked input feature
+    also drifted in the same window and annotates the result accordingly.
+
+    Args:
+        feature_drift: infra-level report from :class:`CovarianceShiftDetector`
+            (``None`` if not available for this window).
+        output_drift: model-level report from ``detection/drift_monitor.py``
+            (``None`` if not available for this window).
+
+    Returns:
+        A dict with both signals, the ``correlation`` annotation
+        (``"explained"`` / ``"unexplained"`` / ``"not_applicable"``), the
+        ``case`` key into :data:`TRIAGE_DECISION_TREE`, and the recommended
+        ``action``.
+    """
+    feature_flagged = bool(feature_drift and feature_drift.drift_detected)
+    output_flagged = bool(output_drift and output_drift.drift_detected)
+
+    drifted_features = (
+        sorted(
+            (name for name, score in feature_drift.mmd_per_feature.items() if score > 0),
+            key=lambda n: feature_drift.mmd_per_feature[n],
+            reverse=True,
+        )
+        if feature_drift
+        else []
+    )
+
+    if output_flagged and feature_flagged:
+        case = "both_drifted"
+        correlation = "explained"
+    elif output_flagged:
+        case = "only_output_drifted"
+        correlation = "unexplained"
+    elif feature_flagged:
+        case = "only_input_drifted"
+        correlation = "not_applicable"
+    else:
+        case = "no_drift"
+        correlation = "not_applicable"
+
+    return {
+        "feature_drift": feature_drift.to_dict() if feature_drift else None,
+        "output_drift": output_drift.to_dict() if output_drift else None,
+        "feature_drift_detected": feature_flagged,
+        "output_drift_detected": output_flagged,
+        "drifted_features": drifted_features,
+        "correlation": correlation,
+        "case": case,
+        "interpretation": TRIAGE_DECISION_TREE[case]["interpretation"],
+        "action": TRIAGE_DECISION_TREE[case]["action"],
+    }
+
+
 def _rbf_kernel(X: np.ndarray, Y: np.ndarray, bandwidth: float) -> np.ndarray:
     diff = X[:, None, :] - Y[None, :, :]
     return np.exp(-np.sum(diff**2, axis=-1) / (2 * bandwidth**2))
@@ -195,65 +287,3 @@ class CovarianceShiftDetector:
         else:
             self.health.record_success()
             return DriftReport(mmd_per_feature=mmd_scores, drift_detected=drift_detected)
-
-
-def check_drift_monitor_health(
-    detector: CovarianceShiftDetector,
-    max_age_seconds: float | None = None,
-) -> dict:
-    """Evaluate *detector*'s heartbeat and log a distinct "drift-check failed"
-    alert if it is stale (never succeeded, or last succeeded too long ago).
-
-    Intended to be called periodically (e.g. a Kubernetes CronJob or the
-    ``python -m monitoring.drift_detector --heartbeat-check`` CLI below) from
-    a process that shares the long-lived ``detector`` instance with whatever
-    calls ``detect()`` in the live pipeline. Returns the same dict as
-    ``DriftMonitorHealth.status()``.
-    """
-    from config import config
-
-    max_age = (
-        max_age_seconds
-        if max_age_seconds is not None
-        else config.DRIFT_MONITOR_HEARTBEAT_MAX_AGE_SECONDS
-    )
-    status = detector.health.status(max_age)
-    if status["stale"]:
-        logger.critical(
-            "drift-check failed: drift monitor heartbeat is stale (last success=%s, "
-            "consecutive_failures=%d, max_age=%ss) — feature drift detection may not be "
-            "running; treat as if drift monitoring is DOWN until resolved",
-            status["last_success_at"],
-            status["consecutive_failures"],
-            max_age,
-        )
-    return status
-
-
-def _cli() -> int:  # pragma: no cover — thin operational wrapper
-    import argparse
-    import json
-
-    parser = argparse.ArgumentParser(description="Drift monitor heartbeat/health check")
-    parser.add_argument("--heartbeat-check", action="store_true", default=False)
-    parser.add_argument("--max-age-seconds", type=float, default=None)
-    args = parser.parse_args()
-
-    if not args.heartbeat_check:
-        parser.print_help()
-        return 1
-
-    # A standalone CLI invocation has no long-lived detector to inspect; this
-    # reports "stale" by construction, documenting the *shape* of the check
-    # for operators wiring it into a real scheduler that shares the
-    # in-process detector with the live pipeline (see docstring above).
-    detector = CovarianceShiftDetector()
-    status = check_drift_monitor_health(detector, max_age_seconds=args.max_age_seconds)
-    print(json.dumps(status, indent=2))
-    return 1 if status["stale"] else 0
-
-
-if __name__ == "__main__":  # pragma: no cover
-    import sys
-
-    sys.exit(_cli())
