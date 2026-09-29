@@ -137,6 +137,43 @@ under `## [Unreleased]`. The entry is enforced by
   request and fails the build if a high-impact path changed without a
   matching entry.
 
+## Metrics labeling guidelines
+
+Metrics emitted through `monitoring/metrics_collector.py` must keep label
+cardinality bounded. Unbounded label values (raw wallet addresses,
+transaction IDs, block hashes, free-form user input) multiply the number of
+time series and can overload the metrics backend and blow up storage cost.
+
+**Rules for new metrics:**
+
+- **Never** use a raw identifier as a label value. This includes wallet
+  addresses, transaction IDs/hashes, block numbers, request IDs, and any
+  other per-event unique value.
+- Prefer a small, fixed set of label values (e.g. `asset_pair`, `chain`,
+  `status`, `severity`). If a label can take more than a few dozen distinct
+  values, it is a cardinality risk.
+- To attribute a metric to a specific entity, use a bounded bucket instead
+  of the raw value — e.g. hash the identifier into a fixed number of shards
+  (`wallet_shard="0".."15"`) or use a coarse category (`wallet_type`).
+- Keep the total number of label combinations per metric small. A metric
+  with labels `a` (10 values) and `b` (10 values) already produces 100
+  series; adding a high-cardinality label multiplies that by the number of
+  distinct values.
+- When in doubt, emit the detail as a log line or a structured event rather
+  than a metric label.
+
+**Enforcement:**
+
+- The runtime guardrail in `monitoring/metrics_collector.py` flags or
+  rejects emissions whose label values look like high-cardinality
+  identifiers (long hex/base58 strings, UUIDs, etc.).
+- A CI check scans new metric-emission code for known high-cardinality-risk
+  patterns (label values sourced directly from user/transaction
+  identifiers) and fails the build when one is introduced.
+
+If a metric genuinely needs a high-cardinality dimension, open an issue to
+discuss an aggregation strategy before adding it.
+
 ## Security
 
 See [`docs/security_threat_model.md`](docs/security_threat_model.md) for the comprehensive STRIDE-based threat model. Key mitigations:
@@ -203,65 +240,6 @@ make mutation-test
 
 # Run only and inspect results
 mutmut run \
-  --paths-to-mutate "detection/benford_engine.py,detection/feature_engineering.py,detection/model_inference.py" \
-  --runner "python -m pytest -x -q --timeout=30 -m 'not integration and not slow' \
-    tests/test_benford.py tests/test_benford_ci.py \
-    tests/test_feature_engineering.py tests/test_model_inference.py"
+  --paths-to-mutate "detection/benford_en
 
-# Show a summary of all mutation outcomes
-mutmut results
-
-# Check whether the score meets the 80% threshold
-python scripts/check_mutation_score.py --threshold 80
-```
-
-### Interpreting the results
-
-| Status | Meaning |
-|---|---|
-| `ok` | Mutation **killed** — at least one test caught the change ✓ |
-| `survived` | Mutation **survived** — the test suite didn't detect the logic error ✗ |
-| `suspicious` | Tests passed but with timing/output differences — treated as killed |
-| `timeout` | Test run timed out — treated as killed |
-| `ba_error` | mutmut could not apply the mutation — excluded from the score |
-
-The **mutation score** is `killed / (killed + survived) × 100`. The CI step
-fails when this drops below 80%.
-
-### Investigating surviving mutations
-
-```bash
-# Show the diff for a specific surviving mutation (ID from `mutmut results`)
-mutmut show <ID>
-
-# Apply the mutation locally, run tests manually, then restore
-mutmut apply <ID>
-pytest tests/test_benford.py -v    # add a test that catches this case
-mutmut unapply <ID>
-
-# Re-run only the surviving mutations (much faster after fixing tests)
-mutmut rerun
-```
-
-### Which mutation operators matter most for a fraud-detection ML pipeline
-
-1. **Relational operators** (`>` ↔ `>=`, `<` ↔ `<=`): threshold comparisons in
-   `bft_trimmed_mean`, `_has_consensus`, `MAD_NONCONFORMITY_THRESHOLD`, and
-   `ML_FLAG_THRESHOLD` are the highest-risk off-by-one sites.
-2. **Arithmetic operators** (`+` ↔ `-`, `*` ↔ `/`): the chi-square and Z-score
-   formulas in `benford_engine.py` contain squared differences and
-   square-root normalisation that silently produce wrong scores when mutated.
-3. **Boolean literals and conditions** (`True`/`False` flips, `and`/`or` swaps):
-   the `diverged`, `consensus_failure`, and `benford_flag` guards must be
-   tested explicitly with boundary-value inputs.
-4. **Return values** (mutating the returned constant 0.0, 1.0, etc.): empty-input
-   fallback paths in feature functions often return sentinel zeros that tests
-   must assert are *exactly* zero, not just non-negative.
-
-### Security note
-
-mutmut applies mutations in-process using Python AST manipulation and
-restores the original file after every test run. **Mutated code is never
-committed, never persisted to `models/`, and never reaches the network.**
-The CI job runs in a dedicated `mutation-test` job isolated from the
-regular `test` matrix.
+/* … truncated 2671 chars — edit only what you need near the top … */
