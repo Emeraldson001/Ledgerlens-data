@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Staleness-aware asset metadata caching with trust-tier fallback
+  (`ingestion/asset_metadata_fetcher.py`, issue #917): `get_asset_metadata()`
+  returns an `AssetMetadataRecord` labelled with its trust tier (`primary`,
+  `cache`, `alternate`, `unavailable`), `fetched_at`, age and staleness. It
+  follows a documented primary -> cache -> alternate chain when the primary
+  source is unavailable. Forensic reports (`asset_metadata` field and a
+  Markdown provenance section) and `build_extended_feature_vector` surface the
+  tier and staleness. See `docs/asset_metadata_trust_tiers.md`.
 - Single, authenticated, cryptographically-gated model promotion/rollback path
   (`detection/model_governance.py`, issue #671): `RiskScorer` now hard-blocks
   on any model that fails Ed25519 signature or transparency-log verification
