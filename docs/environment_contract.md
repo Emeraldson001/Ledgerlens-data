@@ -215,6 +215,7 @@ Auto-generated from `config.py` by `scripts/generate_env_contract_docs.py` (Issu
 | `RISK_PROP_CONVERGENCE_THRESHOLD` | `RISK_PROP_CONVERGENCE_THRESHOLD` | `float` | No | `'0.01'` | Weighted personalised PageRank convergence (detection/risk_propagation.py) |
 | `TRADE_DEDUP_TTL_SECONDS` | `TRADE_DEDUP_TTL_SECONDS` | `int` | No | `str(24 * 3600)` | Trade ingestion dedup cache (ingestion/trade_deduplicator.py) |
 | `TRADE_DEDUP_CACHE_KEY_PREFIX` | `TRADE_DEDUP_CACHE_KEY_PREFIX` | `str` | No | `'ledgerlens:trades:'` | — |
+| `IDEMPOTENCY_TTL_HOURS` | `IDEMPOTENCY_TTL_HOURS` | `int` | No | `'48'` | Pipeline stage idempotency-key TTL (pipeline/idempotency.py); see docs/idempotency.md |
 | `PARALLEL_EXECUTOR_BACKEND` | `PARALLEL_EXECUTOR_BACKEND` | `str` | No | `'process'` | Parallel processing controls — Issue #528 (ingestion/parallel_executor.py) Executor backend: "process" uses ProcessPoolExecutor (bypasses the GIL, best for CPU-heavy Benford / feature engineering work); "thread" uses ThreadPoolExecutor (lower overhead for I/O-bound tasks). |
 | `PARALLEL_EXECUTOR_MAX_WORKERS` | `PARALLEL_EXECUTOR_MAX_WORKERS` | `int` | No | `str(max(1, (os.cpu_count() or 2) - 1))` | Maximum number of worker processes/threads.  Defaults to CPU count − 1 (≥ 1). |
 | `PARALLEL_EXECUTOR_MAX_PENDING` | `PARALLEL_EXECUTOR_MAX_PENDING` | `int` | No | `'64'` | Maximum number of futures that may be in-flight simultaneously (back-pressure). 0 disables the limit. |
