@@ -119,6 +119,11 @@ class Config:
 
     # Solana RPC endpoint for cross-chain resolution
     SOLANA_RPC_URL: str = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
+    # Include program-derived / program-owned Solana accounts as identity-graph
+    # edges (#881). Off by default: PDAs are not user-controlled wallets.
+    SOLANA_INCLUDE_PDA_EDGES: bool = (
+        os.getenv("SOLANA_INCLUDE_PDA_EDGES", "false").lower() == "true"
+    )
 
     MIN_TRADES_FOR_SCORING: int = int(os.getenv("MIN_TRADES_FOR_SCORING", "20"))
     LIST_RELOAD_INTERVAL_SECONDS: int = int(os.getenv("LIST_RELOAD_INTERVAL_SECONDS", "60"))
