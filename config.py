@@ -259,6 +259,46 @@ class Config:
     ADV_TRAINING_EPSILON: float = float(os.getenv("ADV_TRAINING_EPSILON", "0.1"))
     ADV_TRAINING_RATIO: float = float(os.getenv("ADV_TRAINING_RATIO", "0.5"))
 
+    # Adversarial-training curriculum + early stopping (Issue #872)
+    # Weak-to-strong epsilon ramp-up instead of a fixed budget every epoch.
+    # "" (default) keeps the pre-#872 fixed-epsilon behavior unchanged;
+    # "linear" ramps epsilon continuously from ADV_TRAINING_CURRICULUM_START_EPSILON
+    # to ADV_TRAINING_EPSILON; "step" ramps it in 4 discrete stages.
+    # Recommended default when enabling: ADV_TRAINING_CURRICULUM=linear with
+    # ADV_TRAINING_EPOCHS>=5 (a 2-3 epoch run barely ramps at all) — see
+    # docs/adversarial_curriculum.md.
+    ADV_TRAINING_CURRICULUM: str = os.getenv("ADV_TRAINING_CURRICULUM", "")
+    # Starting epsilon for the ramp. "" (default) falls back to
+    # ADV_TRAINING_EPSILON / 4 at call time.
+    ADV_TRAINING_CURRICULUM_START_EPSILON: float | None = (
+        float(os.getenv("ADV_TRAINING_CURRICULUM_START_EPSILON"))
+        if os.getenv("ADV_TRAINING_CURRICULUM_START_EPSILON")
+        else None
+    )
+    # Consecutive epochs with no robust (adversarial) validation AUC
+    # improvement before stopping early. 0 (default) disables early stopping,
+    # matching the pre-#872 behavior of always running every requested epoch.
+    ADV_TRAINING_EARLY_STOP_PATIENCE: int = int(os.getenv("ADV_TRAINING_EARLY_STOP_PATIENCE", "0"))
+    # Path the curriculum training loop appends per-epoch clean/robust
+    # accuracy runs to via mlops.experiment_tracking.JsonlExperimentTracker.
+    # "" (default) disables experiment logging (no file writes).
+    ADV_TRAINING_EXPERIMENT_LOG_PATH: str = os.getenv("ADV_TRAINING_EXPERIMENT_LOG_PATH", "")
+
+    # Backdoor detection auto-quarantine (Issue #871)
+    # Set BACKDOOR_SCAN_ENABLED=true to run activation-clustering backdoor
+    # detection after every training run and auto-quarantine a flagged
+    # candidate (detection.model_governance.quarantine_candidate) pending
+    # human review.
+    BACKDOOR_SCAN_ENABLED: bool = os.getenv("BACKDOOR_SCAN_ENABLED", "false").lower() == "true"
+    BACKDOOR_SCAN_MODEL_NAME: str = os.getenv("BACKDOOR_SCAN_MODEL_NAME", "random_forest")
+    # Fraction of training samples flagged by activation clustering above
+    # which a candidate is auto-quarantined. See
+    # detection.adversarial.backdoor_detector.DEFAULT_QUARANTINE_FLAGGED_FRACTION_THRESHOLD
+    # for the measured false-positive rate at the default value.
+    BACKDOOR_SCAN_FLAGGED_FRACTION_THRESHOLD: float = float(
+        os.getenv("BACKDOOR_SCAN_FLAGGED_FRACTION_THRESHOLD", "0.5")
+    )
+
     # Model integrity & BFT voting
     MODEL_SIGNING_PRIVATE_KEY_PATH: str = os.getenv("MODEL_SIGNING_PRIVATE_KEY_PATH", "")
     TRUSTED_SIGNING_KEY_FINGERPRINT: str = os.getenv("TRUSTED_SIGNING_KEY_FINGERPRINT", "")

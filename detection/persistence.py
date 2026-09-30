@@ -126,7 +126,12 @@ class EnsembleWeightRecord(Base):
 class ModelVersionRecord(Base):
     """Tracks every trained model version with its shadow deployment lifecycle.
 
-    ``status`` transitions: shadow → production | rolled_back | archived.
+    ``status`` transitions: shadow → production | rolled_back | archived, or
+    shadow/production → quarantined (Issue #871: a backdoor scan flagged
+    this candidate; ``quarantine_reason``/``quarantined_at`` are populated
+    and ``detection.model_governance.promote_candidate`` refuses to ever
+    promote a quarantined ``model_artifact_path`` again, pending human
+    review — see ``detection.model_governance.quarantine_candidate``).
     ``training_metadata`` stores a JSON blob (metrics, feature hash, etc.).
     ``artifact_signature`` is the hex Ed25519 signature of the model directory
     produced by :class:`ModelArtifact` — verified on rollback before loading.
@@ -160,6 +165,13 @@ class ModelVersionRecord(Base):
     # predecessor in the shadow -> production -> rolled_back chain), used to
     # walk the promotion history and to find the rollback target.
     parent_version_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Issue #871: populated only when status == "quarantined". quarantine_reason
+    # is a short human-readable summary (the full structured backdoor report is
+    # stored in training_metadata); quarantined_at records when the scan flagged it.
+    quarantined_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    quarantine_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ShapQueryCount(Base):
