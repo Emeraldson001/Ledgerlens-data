@@ -3,6 +3,7 @@ import json
 import logging
 import sys
 
+from cli.audit import audit_cli_command
 from cli.commands.validate_artifacts import validate_artifacts
 from cli.diagnostics import run_diagnostics
 
@@ -30,6 +31,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     val_parser.add_argument(
         "--dir", default="artifacts", help="Path to artifacts folder (default: artifacts)"
+    )
+    val_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help=(
+            "Report what artifacts would be validated without writing any outputs. "
+            "Produces zero side effects."
+        ),
     )
 
     return parser
@@ -63,7 +73,8 @@ def main(args=None) -> int:
         return 0 if report["overall_status"] == "PASS" else 2
 
     elif opts.command == "validate-artifacts":
-        res = validate_artifacts(opts.dir)
+        with audit_cli_command("validate-artifacts", args={"dir": opts.dir}):
+            res = validate_artifacts(opts.dir)
         print(json.dumps(res, indent=2))
         return 0 if res["status"] == "PASS" else 1
 

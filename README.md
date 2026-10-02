@@ -904,3 +904,8 @@ MIT
 *Built for the Stellar ecosystem. Open source. Community owned.*
 
 </div>
+
+## Handsoff notes
+
+<!-- handsoff-issue-939 -->
+- #939: Hyperparameter search: add search-budget-aware early termination for unpromising trials
