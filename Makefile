@@ -1,4 +1,4 @@
-.PHONY: install lint format test run scale-workers typecheck mutation-test threshold-sweep anonymization-check check-env check-schema-compatibility check-review-gates ops-check ops-validate static-analysis benchmark verify-lockfile regenerate-lockfile dependency-risk-report dependency-risk-report-osv partition-write partition-read retention-scan snapshot-freeze snapshot-list snapshot-verify run-compare run-compare-all check-cycles probe-deps probe-deps-json validate-readme validate-readme-warn validate-notebooks validate-notebooks-strict validate-notebooks-ci validate-all check-integrity dead-path-report env-docs env-docs-check migrate migrate-status migrate-dry-run new-migration onboard onboard-fix onboard-json
+.PHONY: install lint format test run scale-workers typecheck mutation-test threshold-sweep anonymization-check check-env check-schema-compatibility check-review-gates ops-check ops-validate static-analysis benchmark verify-lockfile regenerate-lockfile dependency-risk-report dependency-risk-report-osv partition-write partition-read retention-scan snapshot-freeze snapshot-list snapshot-verify run-compare run-compare-all check-cycles probe-deps probe-deps-json validate-readme validate-readme-warn validate-notebooks validate-notebooks-strict validate-notebooks-ci validate-all check-integrity dead-path-report env-docs env-docs-check migrate migrate-status migrate-dry-run new-migration onboard onboard-fix onboard-json maturity-report check-stale-maturity check-deps scan-secrets
 .ONESHELL:
 
 VENV_BIN := $(abspath .venv/bin)
@@ -526,3 +526,56 @@ ops-check:
 
 ops-validate:
 	python -m cli.main validate-artifacts
+
+# ---------------------------------------------------------------------------
+# Repository maturity report (Issue #958)
+#
+# Usage:
+#   make maturity-report             # write docs/maturity_report.md
+#   make maturity-report BADGES=docs/badges   # also write per-module badges
+#   make check-stale-maturity        # CI stale-entry check (fast)
+#
+# Exit codes for check-stale-maturity: 0 = clean, 1 = dangling references.
+# ---------------------------------------------------------------------------
+MATURITY_OUTPUT ?= docs/maturity_report.md
+BADGES ?=
+
+maturity-report:
+	@echo "==> Generating repository maturity report..."
+	$(PYTHON) scripts/generate_maturity_report.py \
+		--output $(MATURITY_OUTPUT) \
+		$(if $(BADGES),--badges $(BADGES),)
+	@echo "==> Report written to $(MATURITY_OUTPUT)"
+
+check-stale-maturity:
+	@echo "==> Checking repo_maturity.yaml for stale path references..."
+	$(PYTHON) scripts/generate_maturity_report.py --check-stale --quiet
+
+# ---------------------------------------------------------------------------
+# Module dependency / boundary enforcement alias (Issue #957)
+#
+# ``check-deps`` is the CI-facing name; ``check-boundaries`` also works
+# (see the existing target above).
+#
+# Usage:
+#   make check-deps
+#   make check-deps PACKAGE=detection
+# ---------------------------------------------------------------------------
+check-deps:
+	@echo "==> Enforcing module layering rules (config/module_boundaries.yml)..."
+	$(PYTHON) scripts/check_module_dependencies.py $(if $(PACKAGE),--package $(PACKAGE),)
+
+# ---------------------------------------------------------------------------
+# Secret-detection scan (Issue #956)
+#
+# Usage:
+#   make scan-secrets                  # scan default target paths
+#   make scan-secrets SCAN_PATHS="config/ .env.example"
+#
+# Exit codes: 0 = clean, 1 = secret-shaped values found, 2 = crash.
+# ---------------------------------------------------------------------------
+SCAN_PATHS ?=
+
+scan-secrets:
+	@echo "==> Running secret-detection scan..."
+	$(PYTHON) scripts/scan_secrets.py $(if $(SCAN_PATHS),--paths $(SCAN_PATHS),)

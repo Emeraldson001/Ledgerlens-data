@@ -28,6 +28,27 @@ make test     # pytest (unit tests only — no network)
 make check-env-example  # verify .env.example covers every config.py variable
 ```
 
+### Module boundary enforcement (Issue #957)
+
+This repo enforces a strict layering rule between its top-level packages:
+`foundation` (utils, config) → `domain` (detection, ingestion, streaming, …) → `entrypoint` (api, scripts).
+A lower-layer package must never import from a higher-layer one.  The rules
+are declared in `config/module_boundaries.yml` and enforced by:
+
+```bash
+make check-deps           # check all packages
+make check-deps PACKAGE=detection  # check only one package
+```
+
+This check also runs as a required step in CI (`Check module dependency rules`
+in `.github/workflows/ci.yml`).  A PR that introduces a boundary violation
+will fail CI — fix it by restructuring the import or moving shared code to
+`utils/` or `config/`.
+
+To deliberately test that the check catches violations, temporarily add a
+`from api import ...` line in any `detection/` file, run `make check-deps`,
+and observe the violation message, then revert.
+
 Optionally install the pre-commit hooks so checks run automatically:
 
 ```bash

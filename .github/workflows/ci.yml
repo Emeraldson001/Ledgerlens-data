@@ -235,8 +235,25 @@ jobs:
       - name: Check typed service boundaries (utils/boundaries.py)
         run: python scripts/check_service_boundaries.py
 
-      - name: Check module dependency rules (config/module_boundaries.yml)
+      - name: Check module dependency rules (config/module_boundaries.yml) (Issue #957)
+        # Enforces that no lower-layer package imports a higher-layer one.
+        # Exit 1 = at least one violation — required check, blocks PR merge.
         run: python scripts/check_module_dependencies.py
+
+      - name: Stale-entry check for repo_maturity.yaml (Issue #958)
+        # Fails if config/repo_maturity.yaml references a path that no longer
+        # exists — prevents the maturity report from quietly mis-scoring the repo.
+        run: python scripts/generate_maturity_report.py --check-stale --quiet
+
+      - name: Generate repository maturity report (Issue #958)
+        # Produces docs/maturity_report.md — informational, never blocks CI.
+        run: python scripts/generate_maturity_report.py --output docs/maturity_report.md --quiet
+        continue-on-error: true
+
+      - name: Secret-detection scan (Issue #956)
+        # Regex + entropy scan of config files and .env.example for accidentally
+        # committed secret-shaped values. Exit 1 = secrets found — required check.
+        run: python scripts/scan_secrets.py
 
       - name: Check public API compatibility (tests/fixtures/api_baseline.json)
         run: python scripts/check_api_compatibility.py
