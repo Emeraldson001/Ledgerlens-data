@@ -267,6 +267,16 @@ models/metrics.json.sig
 # Dead-letter queue files (runtime output)
 alerts_dlq.ndjson
 
+# Issue #963 — Migration snapshot test artefacts (generated at runtime)
+tests/migration_snapshots/
+data/migration_test_snapshots/
+migration_snapshot_*.db
+migration_snapshot_*.sqlite
+
+# Issue #961 — CLI audit trail (runtime-generated; not committed)
+data/audit_trail.ndjson
+data/cli_audit_trail.ndjson
+
 # Grafana provisioning secrets
 monitoring/grafana/provisioning/datasources/*.yaml
 
