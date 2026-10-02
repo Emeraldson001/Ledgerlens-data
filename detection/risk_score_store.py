@@ -81,7 +81,12 @@ class RiskScoreStore:
                             index_elements=["wallet", "asset_pair"],
                             set_=update_columns,
                         )
-                    )
+                    else:
+                        raise NotImplementedError(
+                            f"Atomic upsert not configured for dialect "
+                            f"'{dialect_name}'. Add an ON CONFLICT / equivalent "
+                            f"branch in RiskScoreStore._upsert_impl."
+                        )
                     if existing is None:
                         existing = RiskScoreRecord(wallet=wallet, asset_pair=asset_pair)
                         session.add(existing)
@@ -95,18 +100,6 @@ class RiskScoreStore:
                         existing.propagated_risk = float(risk_score["propagated_risk"])
                     if "ring_id" in risk_score:
                         existing.ring_id = risk_score["ring_id"]
-
-                        stmt = dialect_insert(table).values(**values)
-                        stmt = stmt.on_conflict_do_update(
-                            index_elements=["wallet", "asset_pair"],
-                            set_=update_columns,
-                        )
-                    else:
-                        raise NotImplementedError(
-                            f"Atomic upsert not configured for dialect "
-                            f"'{dialect_name}'. Add an ON CONFLICT / equivalent "
-                            f"branch in RiskScoreStore._upsert_impl."
-                        )
                     session.execute(stmt)
                     session.commit()
                     return self.get(wallet, asset_pair)
