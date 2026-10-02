@@ -63,6 +63,8 @@ Auto-generated from `config.py` by `scripts/generate_env_contract_docs.py` (Issu
 | `KAFKA_LAG_ALERT_THRESHOLD` | `KAFKA_LAG_ALERT_THRESHOLD` | `int` | No | `'500'` | — |
 | `KAFKA_METRICS_PORT` | `KAFKA_METRICS_PORT` | `int` | No | `'9100'` | — |
 | `TRADE_AVRO_SCHEMA_PATH` | `TRADE_AVRO_SCHEMA_PATH` | `str` | No | `'data/trade_avro_schema.json'` | — |
+| `SCHEMA_REGISTRY_URL` | `SCHEMA_REGISTRY_URL` | `str | None` | Yes | — | Confluent-compatible Schema Registry base URL (ingestion/avro_codec.py). When unset, schemas are registered in an in-process registry instead. |
+| `SCHEMA_COMPATIBILITY_MODE` | `SCHEMA_COMPATIBILITY_MODE` | `str` | No | `'BACKWARD'` | NONE, BACKWARD, FORWARD or FULL; enforced when a producer registers its schema. |
 | `WORKER_HEALTH_STALE_THRESHOLD_SECONDS` | `WORKER_HEALTH_STALE_THRESHOLD_SECONDS` | `float` | No | `'120'` | Worker health monitoring (streaming/health.py::WorkerHealthMonitor). A worker is marked UNHEALTHY when it has not heartbeat within this many seconds — should comfortably exceed the poll-loop interval plus the slowest expected per-message processing time. |
 | `E2E_LATENCY_BUDGET_MS` | `E2E_LATENCY_BUDGET_MS` | `int` | No | `'2000'` | End-to-end latency budget (Issue #124) |
 | `LATENCY_ANOMALY_RATE_THRESHOLD` | `LATENCY_ANOMALY_RATE_THRESHOLD` | `float` | No | `'0.90'` | — |
