@@ -125,6 +125,45 @@ slow'` to exclude both):
   `ledgerlens-api`, `ledgerlens-contract`, `ledgerlens-dashboard`) can be
   updated.
 
+### API contract compatibility
+
+Any PR that touches `api/app.py` or anything under `contracts/` is gated by
+[`scripts/check_api_compatibility.py`](scripts/check_api_compatibility.py),
+which diffs the public API surface against the committed baseline and fails
+the build on a breaking change. The check runs in CI via
+[`.github/workflows/api-compatibility.yml`](.github/workflows/api-compatibility.yml)
+on every pull request that modifies those paths.
+
+Run it locally before opening such a PR:
+
+```bash
+python scripts/check_api_compatibility.py
+```
+
+#### Intentionally shipping a breaking change
+
+A breaking change is only allowed when it is deliberate and acknowledged:
+
+1. **Bump the API version.** Update the version constant in `api/app.py`
+   (and the matching entry in `contracts/`) so the new surface is published
+   under a new major/minor version.
+2. **Regenerate the baseline.** Re-run the checker with the update flag to
+   record the new contract as the accepted baseline:
+
+   ```bash
+   python scripts/check_api_compatibility.py --update-baseline
+   ```
+
+   Commit the regenerated baseline alongside the version bump so the CI gate
+   sees the change as acknowledged rather than accidental.
+3. **Notify downstream consumers.** Call out the break in the PR description
+   and in the `CHANGELOG.md` entry, and notify the consuming repos
+   (`ledgerlens-core`, `ledgerlens-api`, `ledgerlens-contract`,
+   `ledgerlens-dashboard`) so they can pin or migrate before the release.
+
+Without the version bump and regenerated baseline, the CI job fails and the
+PR cannot merge.
+
 ### Changelog entries
 
 Every PR that touches high-impact paths must include a `CHANGELOG.md` entry
