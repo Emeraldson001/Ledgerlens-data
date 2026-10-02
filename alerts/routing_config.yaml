@@ -54,6 +54,13 @@ rules:
         target: "#acme-wash-trade-alerts"
         severity_label: default
 
+  - name: ingestion-stream-quality
+    detectors: ["stream_quality_monitor"]
+    stop_on_match: true
+    destinations:
+      - channel: slack
+        target: "#data-quality"
+        severity_label: high
   # Emergency watchdog self-test / dead-man's-switch (#928).
   #
   # The watchdog emits a heartbeat to an external, independently-monitored

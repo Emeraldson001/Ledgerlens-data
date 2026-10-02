@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Stream-level ingestion anomaly detection (`ingestion/data_quality.py`, issue
+  #913): `StreamQualityMonitor` keeps rolling per-source baselines of batch
+  volume, key-field null rates and field means, and routes spikes and drops
+  through `alerts/router.py` with source, metric and magnitude context (new
+  `ingestion-stream-quality` rule in `alerts/routing_config.yaml`). Known,
+  expected changes can be acknowledged with suppression windows. Adds the
+  `ingestion_stream_quality.json` Grafana dashboard.
 - Perturbation-strength curriculum, robust-accuracy early stopping, and
   per-epoch experiment tracking for the FGSM adversarial training loop
   (`detection.adversarial.robustness.run_adversarial_training`, issue

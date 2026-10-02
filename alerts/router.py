@@ -95,6 +95,15 @@ class Alert(TypedDict, total=False):
     detectors: list[str]
     risk_score: float
     tenant: str
+    # Stream-level data-quality context (ingestion.data_quality.StreamQualityMonitor)
+    source: str
+    metric: str
+    direction: str
+    observed: float
+    baseline: float
+    magnitude: float
+    detected_at: str
+    message: str
     # Per-pair degradation context (issue #971). Populated by the per-pair
     # metric tracker when a single pair's model quality degrades while
     # aggregate metrics stay flat.
