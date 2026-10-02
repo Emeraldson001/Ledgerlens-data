@@ -137,6 +137,43 @@ under `## [Unreleased]`. The entry is enforced by
   request and fails the build if a high-impact path changed without a
   matching entry.
 
+## Metrics labeling guidelines
+
+Metrics emitted through `monitoring/metrics_collector.py` must keep label
+cardinality bounded. Unbounded label values (raw wallet addresses,
+transaction IDs, block hashes, free-form user input) multiply the number of
+time series and can overload the metrics backend and blow up storage cost.
+
+**Rules for new metrics:**
+
+- **Never** use a raw identifier as a label value. This includes wallet
+  addresses, transaction IDs/hashes, block numbers, request IDs, and any
+  other per-event unique value.
+- Prefer a small, fixed set of label values (e.g. `asset_pair`, `chain`,
+  `status`, `severity`). If a label can take more than a few dozen distinct
+  values, it is a cardinality risk.
+- To attribute a metric to a specific entity, use a bounded bucket instead
+  of the raw value — e.g. hash the identifier into a fixed number of shards
+  (`wallet_shard="0".."15"`) or use a coarse category (`wallet_type`).
+- Keep the total number of label combinations per metric small. A metric
+  with labels `a` (10 values) and `b` (10 values) already produces 100
+  series; adding a high-cardinality label multiplies that by the number of
+  distinct values.
+- When in doubt, emit the detail as a log line or a structured event rather
+  than a metric label.
+
+**Enforcement:**
+
+- The runtime guardrail in `monitoring/metrics_collector.py` flags or
+  rejects emissions whose label values look like high-cardinality
+  identifiers (long hex/base58 strings, UUIDs, etc.).
+- A CI check scans new metric-emission code for known high-cardinality-risk
+  patterns (label values sourced directly from user/transaction
+  identifiers) and fails the build when one is introduced.
+
+If a metric genuinely needs a high-cardinality dimension, open an issue to
+discuss an aggregation strategy before adding it.
+
 ## Security
 
 See [`docs/security_threat_model.md`](docs/security_threat_model.md) for the comprehensive STRIDE-based threat model. Key mitigations:
@@ -203,11 +240,9 @@ make mutation-test
 
 # Run only and inspect results
 mutmut run \
-  --paths-to-mutate "detection/benford_engine.py,detection/feature_engineering.py,detection/model_inference.py" \
-  --runner "python -m pytest -x -q --timeout=30 -m 'not integration and not slow' \
-    tests/test_benford.py tests/test_benford_ci.py \
-    tests/test_feature_engineering.py tests/test_model_inference.py"
+  --paths-to-mutate "detection/benford_en
 
+/* … truncated 2671 chars — edit only what you need near the top … */
 # Show a summary of all mutation outcomes
 mutmut results
 
