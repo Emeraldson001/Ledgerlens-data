@@ -16,6 +16,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source is unavailable. Forensic reports (`asset_metadata` field and a
   Markdown provenance section) and `build_extended_feature_vector` surface the
   tier and staleness. See `docs/asset_metadata_trust_tiers.md`.
+- Schema registry integration with compatibility-mode enforcement
+  (`ingestion/avro_codec.py`, issue #914): `HorizonKafkaProducer` now registers
+  its Avro schema before publishing, with a Confluent-compatible Schema
+  Registry (`SCHEMA_REGISTRY_URL`) or the in-process `SchemaRegistry`.
+  Registration enforces `SCHEMA_COMPATIBILITY_MODE` (`NONE`/`BACKWARD`/
+  `FORWARD`/`FULL`, default `BACKWARD`) and raises `SchemaCompatibilityError`
+  for a breaking change. See `docs/schema_registry_runbook.md`.
+- Stream-level ingestion anomaly detection (`ingestion/data_quality.py`, issue
+  #913): `StreamQualityMonitor` keeps rolling per-source baselines of batch
+  volume, key-field null rates and field means, and routes spikes and drops
+  through `alerts/router.py` with source, metric and magnitude context (new
+  `ingestion-stream-quality` rule in `alerts/routing_config.yaml`). Known,
+  expected changes can be acknowledged with suppression windows. Adds the
+  `ingestion_stream_quality.json` Grafana dashboard.
+- Perturbation-strength curriculum, robust-accuracy early stopping, and
+  per-epoch experiment tracking for the FGSM adversarial training loop
+  (`detection.adversarial.robustness.run_adversarial_training`, issue
+  #872). `CurriculumScheduler` (`detection/adversarial/augmentation.py`)
+  ramps the training epsilon weak-to-strong across epochs (`"linear"` or
+  `"step"`); the adversarial *validation* accuracy used for reporting is
+  always measured at the final target epsilon so per-epoch numbers stay
+  comparable across a curriculum run. Early stopping triggers on stalled
+  *robust* (adversarial) validation accuracy, never clean accuracy, per the
+  issue's explicit requirement. Both are opt-in (`ADV_TRAINING_CURRICULUM`,
+  `ADV_TRAINING_EARLY_STOP_PATIENCE`) and default to the exact pre-#872
+  fixed-epsilon, run-every-epoch behavior. Per-epoch clean/robust AUC is
+  logged to `mlops.experiment_tracking.JsonlExperimentTracker` when
+  `ADV_TRAINING_EXPERIMENT_LOG_PATH` is set. See
+  `docs/adversarial_curriculum.md` for recommended defaults and the
+  measured no-divergence-across-seeds result.
+- Backdoor trigger-feature localization and model-level auto-quarantine
+  (`detection/adversarial/backdoor_detector.py`, issue #871).
+  `localize_trigger_features` ranks feature columns by a Cohen's-d-style
+  effect size between the activation-clustering detector's flagged samples
+  and the rest (a simplified spectral-signature decomposition per Tran, Li
+  & Madry, 2018) so a flag is now actionable instead of a bare yes/no;
+  `ActivationClusteringDetector.structured_report` adds affected
+  sample/wallet identities and wash-trading-ring concentration when
+  available. `scan_and_quarantine` wires this into
+  `detection.model_governance`: a candidate whose flagged fraction exceeds
+  `BACKDOOR_SCAN_FLAGGED_FRACTION_THRESHOLD` (default 50%, set above the
+  measured 25-47% clean-model noise ceiling to keep false positives low) is
+  recorded as
+  `status="quarantined"` (`ModelVersionRecord`, migration `0008`) and
+  `promote_candidate` now raises `QuarantinedModelError` for that
+  `candidate_dir` on every subsequent attempt, whether or not
+  `backdoor_report` is passed again — there is no "un-quarantine" API by
+  design. Optional pipeline wiring via `BACKDOOR_SCAN_ENABLED`. See
+  `docs/adversarial_robustness.md#trigger-feature-localization--model-level-auto-quarantine--issue-871`
+  and `docs/security_threat_model.md` (new Model Training tampering row and
+  High-Risk Entry Point #7) for the measured clean-model false-positive
+  rate and the updated threat model.
 - Single, authenticated, cryptographically-gated model promotion/rollback path
   (`detection/model_governance.py`, issue #671): `RiskScorer` now hard-blocks
   on any model that fails Ed25519 signature or transparency-log verification
