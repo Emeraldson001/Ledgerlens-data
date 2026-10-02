@@ -634,6 +634,9 @@ class Config:
         "TRADE_DEDUP_CACHE_KEY_PREFIX", "ledgerlens:trades:"
     )
 
+    # Pipeline stage idempotency-key TTL (pipeline/idempotency.py); see docs/idempotency.md
+    IDEMPOTENCY_TTL_HOURS: int = int(os.getenv("IDEMPOTENCY_TTL_HOURS", "48"))
+
     # ---------------------------------------------------------------------------
     # Parallel processing controls — Issue #528
     # (ingestion/parallel_executor.py)

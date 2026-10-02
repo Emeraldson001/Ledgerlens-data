@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- TTL eviction and size monitoring for the pipeline idempotency-key store
+  (`pipeline/idempotency.py`, issue #919): `CheckpointStore.evict_expired()`
+  removes keys older than `IDEMPOTENCY_TTL_HOURS` when the store opens and
+  hourly as stages start, keeping the store bounded. Store size and evictions
+  are exported as `ledgerlens_idempotency_store_entries` and
+  `ledgerlens_idempotency_store_evicted_total` and shown on the new
+  "Idempotency Key Store" Grafana dashboard. `IDEMPOTENCY_TTL_HOURS` is now read
+  from the environment via `config.py` (default `48`; reasoning in
+  `docs/idempotency.md`).
 - End-to-end exactly-once audit tooling (`pipeline/exactly_once_audit.py`,
   `scripts/audit_exactly_once.py`, issue #918): traces sample records through
   the ingestion, feature/scoring and alerting dedup boundaries and flags any

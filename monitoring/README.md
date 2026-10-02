@@ -149,3 +149,28 @@ Labels **never** include wallet addresses — only aggregate pair identifiers.
 - **0.7 health score**: below this level at least one major component (latency or Benford freshness) is significantly degraded; investigation is warranted.
 - **30-minute duration**: filters out transient spikes from brief data ingestion gaps without delaying response to sustained degradation.
 - **p95 500ms latency**: 10× the typical p95 under normal load; indicates a systemic issue rather than isolated slow requests.
+
+---
+
+## Idempotency Key Store Dashboard (issue #919)
+
+### Dashboard: `grafana/dashboards/idempotency_store.json`
+
+Tracks the size and growth of the pipeline idempotency-key store
+(`pipeline/idempotency.py::CheckpointStore`). Keys older than
+`IDEMPOTENCY_TTL_HOURS` are evicted, so the store should plateau at about one
+TTL window of keys. A sustained positive growth rate means eviction is not
+running. See `docs/idempotency.md` for the TTL policy.
+
+| Panel | Type | Description |
+|---|---|---|
+| Stored keys | Stat | Current number of stored keys |
+| Growth rate | Stat | Net change in keys per hour over the last 6h |
+| Evicted keys | Stat | Keys evicted by the TTL in the last 24h |
+| Store size by status | Time series | Keys by status (`running`, `done`, `failed`, ...) |
+| Growth rate and eviction rate | Time series | Net growth vs. evictions per hour |
+
+| Metric | Type | Labels |
+|---|---|---|
+| `ledgerlens_idempotency_store_entries` | Gauge | `status` |
+| `ledgerlens_idempotency_store_evicted_total` | Counter | — |
