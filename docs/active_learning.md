@@ -533,6 +533,27 @@ estimation was used:
 }
 ```
 
+## Coreset benchmark & recommended defaults (#889)
+
+Harness: `python -m benchmarks.coreset_benchmark --seed 42 --out reports/coreset_benchmark.json`
+compares `coreset`, `random` and `full_pool` over labelling budgets
+(default 50–800), reporting AUC, accuracy, selection and training wall-clock.
+Output is deterministic for a given `--seed`.
+
+**When coreset is worth its overhead:** at small budgets (≲ 5 % of the pool)
+on multi-modal / imbalanced data, where random sampling under-covers rare
+clusters. Selection cost is O(budget × pool) ANN queries, so as the budget
+grows towards ~10 % of the pool the gain over random shrinks while selection
+time grows; past that point prefer `uncertainty` or random sampling.
+
+**Recommended defaults:**
+
+| Setting | Default | Guidance |
+|---|---|---|
+| `ACTIVE_LEARNING_STRATEGY` | `coreset_hybrid` | Use pure `coreset` only for cold-start rounds |
+| `CORESET_MIN_DISTANCE` | `0.1` | Keep; raise only if the benchmark shows duplicate-heavy picks |
+| Budget per round | ≤ 5 % of pool | Beyond ~10 %, switch to `random`/`uncertainty` |
+| `hnswlib` | installed | Brute-force fallback is O(N²) memory — avoid for pools > 5k |
 ## Diversity-aware batch selection (Issue #886)
 
 Strategy `diversity_aware_batch` (`DiversityAwareBatch`) scores each candidate as

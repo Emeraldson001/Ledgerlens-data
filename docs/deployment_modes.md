@@ -57,6 +57,13 @@ an unrelated runtime error downstream.
 pytest tests/test_deployment_modes.py -v
 ```
 
+## Graceful-shutdown guarantee (streaming workers)
+
+Kafka workers drain in-flight messages on SIGTERM before exiting: every consumed
+message is either fully processed with its offset committed, or not committed at
+all and redelivered. Keep `terminationGracePeriodSeconds` >
+`KAFKA_DRAIN_TIMEOUT_SECONDS` (default 30s) during rolling deploys. See
+`docs/stream_replay_runbook.md#graceful-shutdown--in-flight-draining-892`.
 ## Liveness vs readiness probes (Issue #902)
 
 `streaming.health_check.start_health_server(port)` exposes:
