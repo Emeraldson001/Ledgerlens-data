@@ -65,6 +65,28 @@ set_trades_per_second("XLM/USDC", 24.5)
 
 ---
 
+## Ingestion Stream Quality Dashboard (issue #913)
+
+### Dashboard: `grafana/dashboards/ingestion_stream_quality.json`
+
+Shows the stream-level metrics from `ingestion.data_quality.StreamQualityMonitor`
+(see `docs/data_quality_validation.md`), filterable by the **Source** variable.
+
+| Panel | Type | Description |
+|---|---|---|
+| Batch Volume by Source | Time series | Records per ingestion batch |
+| Key-Field Null Rate | Time series | Null ratio of each monitored key field |
+| Deviation from Rolling Baseline | Time series | z-score per metric; the dashed line marks the default alert threshold (4) |
+| Stream Anomalies | Time series | Anomalies detected over 15 minutes, split by routed vs suppressed |
+
+| Metric | Type | Labels |
+|---|---|---|
+| `ledgerlens_ingestion_stream_metric_value` | Gauge | `source`, `metric` |
+| `ledgerlens_ingestion_stream_metric_zscore` | Gauge | `source`, `metric` |
+| `ledgerlens_ingestion_stream_anomalies_total` | Counter | `source`, `metric`, `direction`, `suppressed` |
+
+---
+
 ## Per-Asset-Pair Health Dashboard (issue #276)
 
 ### Dashboard: `grafana/dashboards/per_pair_health.json`
