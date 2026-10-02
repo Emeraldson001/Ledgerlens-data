@@ -205,6 +205,16 @@ All security-relevant PRs must reference the threat model and document which mit
   It covers naming conventions, function signatures, range validation,
   dataset card updates, SHAP integration, and required test patterns —
   with a complete worked example using `counterparty_variance`.
+- **Adding or renaming a feature? Three places must stay in sync (Issue #946):**
+  1. `detection/feature_engineering.py` — add/rename the feature column.
+  2. `data/feature_dictionary.md` — add a new `### N.M · \`feature_name\`` entry
+     with Formula, Range, Empirical p1–p99, High/Low value, and Mutable fields
+     (copy the template from any existing entry in the same section).
+  3. `reporting/feature_labels.py` — if the feature should appear in narrative
+     reports, add a plain-English label to `FEATURE_LABELS`.
+  Run `python scripts/check_feature_label_consistency.py` locally (or
+  `make check-feature-labels`) to confirm all three are consistent before
+  opening a PR — the CI will also enforce this automatically.
 - **Replacing a trained model artifact?** Run `make validate-artifacts`
   before committing — see
   [`docs/artifact_backward_compatibility.md`](docs/artifact_backward_compatibility.md)
