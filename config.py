@@ -346,6 +346,13 @@ class Config:
     AL_BATCH_SIZE: int = int(os.getenv("AL_BATCH_SIZE", "20"))
     AL_RETRAIN_THRESHOLD: int = int(os.getenv("AL_RETRAIN_THRESHOLD", "50"))
     AL_ROLLBACK_AUC_DROP: float = float(os.getenv("AL_ROLLBACK_AUC_DROP", "0.01"))
+    # Issue #886: diversity vs. uncertainty tradeoff for batch acquisition (0=uncertainty only)
+    AL_DIVERSITY_WEIGHT: float = float(os.getenv("AL_DIVERSITY_WEIGHT", "0.5"))
+    # Issue #887: inter-annotator agreement
+    AL_OVERLAP_FRACTION: float = float(os.getenv("AL_OVERLAP_FRACTION", "0.1"))
+    AL_MIN_ANNOTATOR_KAPPA: float = float(os.getenv("AL_MIN_ANNOTATOR_KAPPA", "0.4"))
+    # Issue #888: max allowed AUC drop on the forgetting regression set
+    AL_FORGETTING_MAX_DROP: float = float(os.getenv("AL_FORGETTING_MAX_DROP", "0.02"))
     AL_QUEUE_PATH: str = os.getenv("AL_QUEUE_PATH", "data/annotation_queue.json")
 
     # Core-set selection (Issue #253)
