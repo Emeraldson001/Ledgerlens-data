@@ -35,6 +35,7 @@ import logging
 import sys
 from typing import Any
 
+from cli.audit import audit_cli_command
 from cli.commands.validate_artifacts import validate_artifacts
 from cli.diagnostics import run_diagnostics
 
@@ -129,6 +130,15 @@ def build_parser() -> argparse.ArgumentParser:
             "schema_hash, error."
         ),
     )
+    val_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help=(
+            "Report what artifacts would be validated without writing any outputs. "
+            "Produces zero side effects."
+        ),
+    )
 
     return parser
 
@@ -193,6 +203,10 @@ def main(args: list[str] | None = None) -> int:
         else:
             print(_format_artifacts_summary(res_with_schema))
         return 0 if res_with_schema["status"] == "PASS" else 1
+        with audit_cli_command("validate-artifacts", args={"dir": opts.dir}):
+            res = validate_artifacts(opts.dir)
+        print(json.dumps(res, indent=2))
+        return 0 if res["status"] == "PASS" else 1
 
     return 0
 
