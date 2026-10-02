@@ -80,6 +80,10 @@ class RiskScoreRecord(Base):
     # completed stream-replay run over a closed, bounded time window
     # (Issue #670). See docs/adr/0001-unified-idempotency-finality.md.
     finality: Mapped[str] = mapped_column(String(16), nullable=False, default="provisional")
+    # Planned for Issue #856: nullable `fused_score_lower`, `fused_score_upper`
+    # (Float) and `fusion_strategy` (String(32)) columns, added by migration
+    # 0008. NULL = fusion not computed. See the plan in
+    # detection/risk_score_store.py (RiskScoreStore) for read/write rules.
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
