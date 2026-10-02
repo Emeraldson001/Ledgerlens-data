@@ -406,3 +406,49 @@ def detect_pair_degradation(
             if alert is not None:
                 alerts.append(alert)
     return alerts
+def compare_pair_metrics(
+    production_scores: dict[str, float],
+    candidate_scores: dict[str, float],
+    *,
+    threshold: float = 0.0,
+) -> dict[str, object]:
+    """Compare production vs. candidate scores per asset pair (issue #936).
+
+    Used by the model-governance shadow-mode evaluation to compute the
+    agreement rate and per-pair metric deltas over a shadow period.  This is
+    a pure computation: it never emits metrics or influences live alerts, so
+    running it against shadow traffic has zero effect on production decisions.
+
+    *production_scores* and *candidate_scores* map canonical asset pairs to
+    risk scores.  A pair is considered to *agree* when both models place it on
+    the same side of *threshold* (both flagged or both not flagged).
+
+    Returns a report dict with ``agreement_rate``, ``pairs_compared``,
+    ``deltas`` (per-pair absolute score delta) and ``disagreements`` (pairs
+    where the flag decision differs).
+    """
+    pairs = sorted(set(production_scores) | set(candidate_scores))
+    deltas: dict[str, float] = {}
+    disagreements: list[str] = []
+    compared = 0
+    agreed = 0
+    for pair in pairs:
+        prod = production_scores.get(pair)
+        cand = candidate_scores.get(pair)
+        if prod is None or cand is None:
+            continue
+        compared += 1
+        deltas[pair] = abs(float(cand) - float(prod))
+        prod_flag = float(prod) >= threshold
+        cand_flag = float(cand) >= threshold
+        if prod_flag == cand_flag:
+            agreed += 1
+        else:
+            disagreements.append(pair)
+    agreement_rate = (agreed / compared) if compared else 1.0
+    return {
+        "agreement_rate": agreement_rate,
+        "pairs_compared": compared,
+        "deltas": deltas,
+        "disagreements": disagreements,
+    }
