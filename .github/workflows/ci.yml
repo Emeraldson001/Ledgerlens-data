@@ -452,12 +452,15 @@ jobs:
         # Keep each mutant paired with the tests that exercise this module.
         # Mutmut restores every mutant after testing,
         # so no mutated code is ever persisted to disk or the workspace.
+        # Issue #964: test_mutation_coverage.py added to kill surviving mutants
+        # in benford_engine, score_normaliser, and risk_propagation.
         run: |
           timeout 10m mutmut run \
             --paths-to-mutate "detection/benford_engine.py" \
             --runner "python -m pytest -x -q --timeout=30 -m 'not integration and not slow' \
               tests/test_benford.py \
-              tests/test_benford_ci.py" \
+              tests/test_benford_ci.py \
+              tests/test_mutation_coverage.py" \
             --no-progress || true
 
       - name: Print mutation results summary

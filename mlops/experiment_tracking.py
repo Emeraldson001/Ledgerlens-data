@@ -179,6 +179,16 @@ class JsonlExperimentTracker:
             handle.write(_stable_json(record) + "\n")
         return record
 
+    # Planned for Issue #858 (DANN training curves):
+    #   def log_curve(self, run: ExperimentRun, name: str,
+    #                 points: list[dict[str, float]]) -> dict[str, Any]
+    # appends one record {"run_id", "type": "curve", "name", "points"} to the
+    # same JSONL file. `points` are per-epoch dicts such as
+    # {"epoch": 0, "lambda": 0.0, "task_loss": ..., "domain_loss": ...,
+    #  "task_accuracy": ..., "domain_accuracy": ...}, and every value is
+    # validated as a finite number, like `log_run` does for metrics.
+    # `list_runs` skips records with type == "curve", so existing readers see
+    # exactly what they see today; a new `list_curves(run_id)` returns them.
     def list_runs(self) -> list[dict[str, Any]]:
         if not self.path.exists():
             return []
