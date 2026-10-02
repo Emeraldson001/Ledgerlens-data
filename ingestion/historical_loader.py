@@ -29,13 +29,16 @@ def load_trades(
     counter_asset: SdkAsset,
     start_time: datetime | None = None,
     limit_per_page: int = 200,
+    *,
+    cursor: str | None = None,
+    horizon_url: str | None = None,
 ) -> Iterator[Trade]:
     """Page through historical trades for an asset pair from Horizon.
 
     If `start_time` is provided, records before it are skipped. Horizon
     paginates results in ascending order by default.
     """
-    server = Server(horizon_url=config.HORIZON_URL)
+    server = Server(horizon_url=horizon_url or config.HORIZON_URL)
 
     call_builder = (
         server.trades()
@@ -43,6 +46,8 @@ def load_trades(
         .limit(limit_per_page)
         .order(desc=False)
     )
+    if cursor:
+        call_builder = call_builder.cursor(cursor)
 
     while True:
         page = _fetch_page(call_builder)
