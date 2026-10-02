@@ -265,3 +265,87 @@ restores the original file after every test run. **Mutated code is never
 committed, never persisted to `models/`, and never reaches the network.**
 The CI job runs in a dedicated `mutation-test` job isolated from the
 regular `test` matrix.
+
+
+## Updating offline stubs when real integration behaviour changes
+
+`integrations/offline_stubs.py::StubContractClient` is an in-memory drop-in
+for `LedgerLensContractClient`.  It is used in local development, unit tests,
+and CI jobs where a live Testnet keypair and deployed contract are unavailable.
+
+### Why stubs drift
+
+When the real `LedgerLensContractClient` changes — a new required field in a
+response, a renamed method, a changed exception type — `StubContractClient`
+can silently diverge.  A diverged stub means tests pass locally but fail
+against the real contract (or vice versa), hiding integration bugs until they
+surface in production.
+
+### Detecting drift automatically
+
+A nightly CI job (`.github/workflows/stub_drift_check.yml`) runs
+`StubDriftDetector.compare_scenarios()` against the canonical set of test
+scenarios defined in `run_contract_test_scenarios()`.  If it fails:
+
+1. Open the failing workflow run and read the diff output — it lists every
+   scenario and field that diverged.
+2. Check the `integrations/contract_client.py` Git log for recent changes to
+   `submit_score`, `get_score`, or related methods.
+3. Update `StubContractClient` to match the real method signature/return shape.
+4. Update `run_contract_test_scenarios()` if a new scenario is needed.
+5. Re-run `pytest tests/test_stub_drift.py` locally to confirm alignment.
+
+### Updating the stub step-by-step
+
+When you change `LedgerLensContractClient`:
+
+1. **Update `StubContractClient`** — mirror the same method signature change
+   in `integrations/offline_stubs.py`.  The stub must behave identically for
+   the happy path (same return keys, same exception types on error paths).
+
+2. **Update `run_contract_test_scenarios()`** — if your change adds a new
+   scenario (e.g., a new method or a new required argument), add a
+   corresponding test scenario to `run_contract_test_scenarios()` in
+   `offline_stubs.py`.
+
+3. **Run the drift detection test locally:**
+   ```bash
+   pytest tests/test_stub_drift.py -v
+   ```
+
+4. **Review `tests/test_offline_stubs.py`** — add a test for any new stub
+   behaviour (happy path + error path).
+
+5. **Include both files in your PR** — changes to the real client and its stub
+   should travel together in the same commit.
+
+### Running the drift check manually
+
+```bash
+python -m pytest tests/test_stub_drift.py -v
+
+# Or run the scenario comparison directly:
+python - <<'EOF'
+from integrations.offline_stubs import StubContractClient, StubDriftDetector, run_contract_test_scenarios
+
+stub_results = run_contract_test_scenarios(client=StubContractClient())
+# Replace the second argument with a real client call in a live environment:
+real_results = run_contract_test_scenarios(client=StubContractClient())
+
+StubDriftDetector().compare_scenarios(stub_results, real_results)
+print("No drift detected.")
+EOF
+```
+
+### Adding a new scenario
+
+To add a new test scenario to the drift-check baseline:
+
+1. Add the scenario function inside `run_contract_test_scenarios()` following
+   the existing pattern.
+2. Add a corresponding test in `tests/test_stub_drift.py`.
+3. Verify that `StubContractClient` correctly handles the new scenario.
+
+The `StubDriftDetector` compares scenarios structurally — it checks whether
+both sides agree on `ok`, `error_type`, and `result_keys`.  It does not
+compare field *values* (those are covered by `tests/test_offline_stubs.py`).
