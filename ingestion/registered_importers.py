@@ -463,7 +463,8 @@ class AMMPoolLoaderRegistry:
     description="""Asset metadata fetcher for circulating supply from Horizon.
     
     Fetches and caches asset circulating supply with 1-hour TTL. Supports both
-    Redis distributed cache and in-process fallback.
+    Redis distributed cache and in-process fallback. Every record carries a
+    trust tier and staleness (primary -> cache -> alternate fallback chain).
     
     Key features:
     - Metadata enrichment: Circulating supply for liquidity scoring
@@ -509,6 +510,26 @@ class AssetMetadataFetcherRegistry:
             asset_issuer=asset_issuer,
             horizon_url=horizon_url,
             redis_client=redis_client,
+        )
+
+    @staticmethod
+    def get_asset_metadata(
+        asset_code: str,
+        asset_issuer: str,
+        horizon_url: str,
+        redis_client=None,
+        alternate_horizon_url: str | None = None,
+    ) -> asset_metadata_fetcher.AssetMetadataRecord:
+        """Fetch asset metadata labelled with its trust tier and staleness.
+
+        See asset_metadata_fetcher.get_asset_metadata() for the fallback chain.
+        """
+        return asset_metadata_fetcher.get_asset_metadata(
+            asset_code=asset_code,
+            asset_issuer=asset_issuer,
+            horizon_url=horizon_url,
+            redis_client=redis_client,
+            alternate_horizon_url=alternate_horizon_url,
         )
 
 
