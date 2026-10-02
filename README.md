@@ -908,6 +908,8 @@ MIT
 
 ## Handsoff notes
 
+<!-- handsoff-issue-878 -->
+- #878: MPC aggregator: add dropout-resilient secret reconstruction
 <!-- handsoff-issue-935 -->
 - #935: Grafana dashboards: add a single 'detection pipeline health' overview dashboard
 <!-- handsoff-issue-939 -->
