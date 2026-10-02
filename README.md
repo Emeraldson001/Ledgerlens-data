@@ -909,3 +909,5 @@ MIT
 
 <!-- handsoff-issue-935 -->
 - #935: Grafana dashboards: add a single 'detection pipeline health' overview dashboard
+<!-- handsoff-issue-939 -->
+- #939: Hyperparameter search: add search-budget-aware early termination for unpromising trials

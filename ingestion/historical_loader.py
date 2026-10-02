@@ -29,13 +29,16 @@ def load_trades(
     counter_asset: SdkAsset,
     start_time: datetime | None = None,
     limit_per_page: int = 200,
+    *,
+    cursor: str | None = None,
+    horizon_url: str | None = None,
 ) -> Iterator[Trade]:
     """Page through historical trades for an asset pair from Horizon.
 
     If `start_time` is provided, records before it are skipped. Horizon
     paginates results in ascending order by default.
     """
-    server = Server(horizon_url=config.HORIZON_URL)
+    server = Server(horizon_url=horizon_url or config.HORIZON_URL)
 
     call_builder = (
         server.trades()
@@ -43,6 +46,8 @@ def load_trades(
         .limit(limit_per_page)
         .order(desc=False)
     )
+    if cursor:
+        call_builder = call_builder.cursor(cursor)
 
     while True:
         page = _fetch_page(call_builder)
@@ -115,3 +120,13 @@ def load_watched_pairs_to_dataframe(start_time: datetime | None = None) -> pd.Da
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
+
+
+def load_trades_file(path: str, scanner=None) -> pd.DataFrame:
+    """Load historical trades from a CSV/Parquet file after pre-parse scanning."""
+    from ingestion.secure_file_handler import check_file
+
+    checked = check_file(path, scanner)
+    if checked.suffix == ".parquet":
+        return pd.read_parquet(checked)
+    return pd.read_csv(checked)
