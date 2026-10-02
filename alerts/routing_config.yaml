@@ -34,6 +34,19 @@ rules:
         target: "${COMPLIANCE_WEBHOOK_URL}"
         severity_label: high
 
+  - name: capacity-forecast-lead-time
+    # Routes alerts produced by CapacityForecaster.check_lead_time_alert().
+    # These carry the detector name "capacity_forecaster" and indicate that a
+    # capacity metric is projected to hit its threshold within lead_time_days.
+    detectors: ["capacity_forecaster"]
+    destinations:
+      - channel: slack
+        target: "#capacity-alerts"
+        severity_label: warning
+      - channel: webhook
+        target: "${CAPACITY_WEBHOOK_URL}"
+        severity_label: warning
+
   - name: tenant-acme-dedicated-channel
     tenant: acme
     destinations:

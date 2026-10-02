@@ -74,6 +74,7 @@ __all__ = [
 
 
 @register_importer(
+    strict=True,
     name="horizon_streamer",
     description="""Real-time trade streaming via Horizon Server-Sent Events (SSE).
     
@@ -146,6 +147,7 @@ class HorizonStreamerRegistry:
 
 
 @register_importer(
+    strict=True,
     name="historical_loader",
     description="""Bulk historical trade loading via Horizon's paginated REST API.
     
@@ -238,6 +240,7 @@ class HistoricalLoaderRegistry:
 
 
 @register_importer(
+    strict=True,
     name="orderbook_loader",
     description="""Order-book event ingestion via Horizon's operations endpoint.
     
@@ -306,6 +309,7 @@ class OrderbookLoaderRegistry:
 
 
 @register_importer(
+    strict=True,
     name="account_activity_loader",
     description="""Account creation and funding data via Horizon's effects endpoint.
     
@@ -365,6 +369,7 @@ class AccountActivityLoaderRegistry:
 
 
 @register_importer(
+    strict=True,
     name="amm_pool_loader",
     description="""AMM liquidity pool trade ingestion via Horizon's pool endpoints.
     
@@ -453,6 +458,7 @@ class AMMPoolLoaderRegistry:
 
 
 @register_importer(
+    strict=True,
     name="asset_metadata_fetcher",
     description="""Asset metadata fetcher for circulating supply from Horizon.
     
@@ -512,6 +518,7 @@ class AssetMetadataFetcherRegistry:
 
 
 @register_importer(
+    strict=True,
     name="payment_path_analyzer",
     description="""Payment path analysis for multi-hop wash trade routing detection.
     
