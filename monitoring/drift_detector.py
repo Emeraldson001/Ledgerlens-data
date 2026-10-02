@@ -197,6 +197,117 @@ class CovarianceShiftDetector:
             return DriftReport(mmd_per_feature=mmd_scores, drift_detected=drift_detected)
 
 
+# ---------------------------------------------------------------------------
+# Embedding-space drift for detection/contrastive/encoder.py outputs (#891)
+# ---------------------------------------------------------------------------
+
+EMBEDDING_CENTROID_SHIFT_THRESHOLD: float = 0.25
+EMBEDDING_COVARIANCE_DRIFT_THRESHOLD: float = 0.30
+
+try:
+    from prometheus_client import Gauge as _Gauge
+
+    _emb_centroid_gauge: _Gauge | None = _Gauge(
+        "ledgerlens_embedding_centroid_shift",
+        "Rolling-window centroid shift of contrastive encoder embeddings (normalised)",
+    )
+    _emb_cov_gauge: _Gauge | None = _Gauge(
+        "ledgerlens_embedding_covariance_drift",
+        "Rolling-window covariance drift of contrastive encoder embeddings (relative Frobenius)",
+    )
+except Exception:  # pragma: no cover
+    _emb_centroid_gauge = None
+    _emb_cov_gauge = None
+
+
+@dataclass
+class EmbeddingDriftReport:
+    centroid_shift: float
+    covariance_drift: float
+    drift_detected: bool
+    n_samples: int
+
+    def to_dict(self) -> dict:
+        return {
+            "centroid_shift": self.centroid_shift,
+            "covariance_drift": self.covariance_drift,
+            "drift_detected": self.drift_detected,
+            "n_samples": self.n_samples,
+        }
+
+
+class EmbeddingDriftMonitor:
+    """Rolling embedding-space drift monitor for contrastive encoder outputs.
+
+    Metrics (both scale-free, compared against a frozen reference window):
+
+    * ``centroid_shift`` — ``||mu_cur - mu_ref|| / sqrt(trace(cov_ref))``: mean
+      displacement measured in reference standard deviations.
+    * ``covariance_drift`` — ``||cov_cur - cov_ref||_F / ||cov_ref||_F``.
+
+    ``observe()`` appends embeddings to a rolling window of ``window_size``
+    rows; once full, metrics are exported to Prometheus (Grafana panel:
+    ``ledgerlens_embedding_*``) and an ``embedding_drift`` alert is routed via
+    ``alerts.router.AlertRouter`` when either metric exceeds its threshold.
+    Response: see ``data/playbooks/embedding_drift.yaml``.
+    """
+
+    def __init__(
+        self,
+        reference: np.ndarray,
+        window_size: int = 1000,
+        centroid_threshold: float = EMBEDDING_CENTROID_SHIFT_THRESHOLD,
+        covariance_threshold: float = EMBEDDING_COVARIANCE_DRIFT_THRESHOLD,
+        router=None,
+        on_alert=None,
+    ) -> None:
+        ref = np.asarray(reference, dtype=np.float64)
+        self._mu_ref = ref.mean(axis=0)
+        self._cov_ref = np.cov(ref, rowvar=False)
+        self._scale = float(np.sqrt(max(np.trace(self._cov_ref), 1e-12)))
+        self._cov_norm = float(max(np.linalg.norm(self._cov_ref), 1e-12))
+        self.window_size = window_size
+        self.centroid_threshold = centroid_threshold
+        self.covariance_threshold = covariance_threshold
+        self._router = router
+        self._on_alert = on_alert
+        self._window: np.ndarray = np.empty((0, ref.shape[1]))
+        self.history: list[EmbeddingDriftReport] = []
+
+    def compute(self, current: np.ndarray) -> EmbeddingDriftReport:
+        cur = np.asarray(current, dtype=np.float64)
+        centroid = float(np.linalg.norm(cur.mean(axis=0) - self._mu_ref) / self._scale)
+        cov = float(np.linalg.norm(np.cov(cur, rowvar=False) - self._cov_ref) / self._cov_norm)
+        return EmbeddingDriftReport(
+            centroid_shift=centroid,
+            covariance_drift=cov,
+            drift_detected=centroid > self.centroid_threshold
+            or cov > self.covariance_threshold,
+            n_samples=len(cur),
+        )
+
+    def observe(self, embeddings: np.ndarray) -> EmbeddingDriftReport | None:
+        """Add a batch to the rolling window; evaluate once the window is full."""
+        self._window = np.vstack([self._window, np.asarray(embeddings)])[-self.window_size :]
+        if len(self._window) < self.window_size:
+            return None
+        report = self.compute(self._window)
+        self.history.append(report)
+        if _emb_centroid_gauge is not None:
+            _emb_centroid_gauge.set(report.centroid_shift)
+            _emb_cov_gauge.set(report.covariance_drift)
+        if report.drift_detected:
+            self._alert(report)
+        return report
+
+    def _alert(self, report: EmbeddingDriftReport) -> None:
+        logger.warning("Embedding drift detected: %s", report.to_dict())
+        alert = {"detectors": ["embedding_drift"], "alert_type": "embedding_drift", **report.to_dict()}
+        destinations = self._router.route(alert) if self._router is not None else []
+        if self._on_alert is not None:
+            self._on_alert(alert, destinations)
+
+
 def check_drift_monitor_health(
     detector: CovarianceShiftDetector,
     max_age_seconds: float | None = None,
