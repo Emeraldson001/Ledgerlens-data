@@ -9,6 +9,11 @@ __pycache__/
 *.pyd
 .Python
 
+# Test caches and artefacts
+.pytest_cache/
+.hypothesis/
+*.snap               # test snapshots (e.g. syrupy)
+__snapshots__/
 # Issue #966 — flaky-test detection and quarantine workflow
 # The quarantine registry is generated at runtime; commit only if you want
 # to track quarantine history in the repo (usually not needed).
