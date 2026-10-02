@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- End-to-end exactly-once audit tooling (`pipeline/exactly_once_audit.py`,
+  `scripts/audit_exactly_once.py`, issue #918): traces sample records through
+  the ingestion, feature/scoring and alerting dedup boundaries and flags any
+  boundary that has degraded to at-least-once or at-most-once (unreachable
+  backend, non-durable staging, committed keys not recognised, TTL shorter
+  than the redelivery window). Runs daily against staging via
+  `.github/workflows/exactly-once-audit.yml`. Invariants and operational
+  impact are documented in `docs/exactly_once_audit.md`.
 - Staleness-aware asset metadata caching with trust-tier fallback
   (`ingestion/asset_metadata_fetcher.py`, issue #917): `get_asset_metadata()`
   returns an `AssetMetadataRecord` labelled with its trust tier (`primary`,
