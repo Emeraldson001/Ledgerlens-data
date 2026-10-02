@@ -263,10 +263,22 @@ dependency_probe_report_*.json
 jwt_public_key.pem
 jwt_private_key.pem
 models/metrics.json.sig
+# Issue #943 — Ed25519 signing keys for audit summaries (never commit private keys)
+audit_signing*.pem
+audit_verify*.pem
+*_priv.pem
+*_signing_key.pem
 
 # Dead-letter queue files (runtime output)
 alerts_dlq.ndjson
 
+# Issue #940 — automated rollback trigger audit logs (runtime-generated JSONL)
+reports/rollback_audit.jsonl
+reports/rollback_audit*.jsonl
+
+# Issue #941 — experiment tracking JSONL store (runtime-generated; use DVC/artifact store for
+# long-term experiment history; the in-repo file is only for local dev/smoke tests)
+models/experiments.jsonl
 # Issue #963 — Migration snapshot test artefacts (generated at runtime)
 tests/migration_snapshots/
 data/migration_test_snapshots/
