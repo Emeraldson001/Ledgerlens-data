@@ -155,6 +155,8 @@ scale-workers:
 # ---------------------------------------------------------------------------
 MUTATION_THRESHOLD ?= 80
 MUTATION_PATHS = detection/benford_engine.py,detection/feature_engineering.py,detection/model_inference.py
+# Issue #964: also scope to score_normaliser and risk_propagation
+MUTATION_PATHS_EXTENDED = detection/benford_engine.py,detection/score_normaliser.py,detection/risk_propagation.py
 
 mutation-test:
 	@echo "==> Running mutation tests on core scoring path..."
@@ -165,6 +167,7 @@ mutation-test:
 		--runner "python -m pytest -x -q --timeout=30 -m 'not integration and not slow' \
 			tests/test_benford.py \
 			tests/test_benford_ci.py \
+			tests/test_mutation_coverage.py \
 			tests/test_feature_engineering.py \
 			tests/test_model_inference.py" \
 		--no-progress || true
