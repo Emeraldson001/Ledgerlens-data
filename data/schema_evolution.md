@@ -184,3 +184,15 @@ Schema files must only be loaded from the bundled `data/` directory at
 startup.  Runtime schema negotiation from untrusted external sources (e.g.
 operator-supplied URLs, user-submitted JSON) is not supported and must not be
 added without a security review.
+
+---
+
+## Account metadata consumer tolerance (Issue #903)
+
+`streaming/account_metadata_stream.py` tolerates additive upstream changes:
+`AccountMetadataUpdate` uses `extra="ignore"` and `validate_metadata_event`
+extracts only known fields (the full record stays in `raw`). Fields outside
+`KNOWN_EFFECT_FIELDS` never fail the event; they log a one-time WARNING and
+increment `ledgerlens_account_metadata_unknown_fields_total{field=...}` so
+operators can see producer-side schema drift. Removing or retyping a required
+field (`account`/`account_id`, `type`/`effect_type`) remains a breaking change.
