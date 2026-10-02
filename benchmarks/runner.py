@@ -283,6 +283,271 @@ def _nanmean(values: list[float]) -> float | None:
 
 
 # ---------------------------------------------------------------------------
+# Adaptive batch-size tuning (issue #970)
+# ---------------------------------------------------------------------------
+#
+# The batch scorer historically used a single static batch size.  Different
+# model types have very different latency/throughput profiles, so a fixed
+# batch size is rarely near-optimal across all of them.  The tuner below
+# observes recent per-batch latency and queue depth and nudges the batch size
+# toward the point where throughput stops improving.
+#
+# Tuning knobs (all configurable via :class:`AdaptiveBatchConfig`):
+#
+#   min_batch_size / max_batch_size
+#       Hard bounds.  These prevent pathological oscillation: the batch size
+#       can never collapse to 1 or explode without limit, no matter how noisy
+#       the latency signal is.
+#   target_latency_ms
+#       The per-batch latency we are willing to tolerate.  When observed
+#       latency is comfortably below this, we grow the batch; when it exceeds
+#       it, we shrink.
+#   queue_high_watermark / queue_low_watermark
+#       Queue-depth hysteresis band.  A deep queue means we are the bottleneck
+#       and should grow; a shallow queue means we are over-provisioned and
+#       should shrink.  The band between the two watermarks is a dead zone
+#       where no change is made, which damps oscillation.
+#   step_fraction
+#       Multiplicative step size for each adjustment (e.g. 0.25 == ±25%).
+#   smoothing
+#       Exponential moving average factor for the latency signal.  Higher
+#       values react faster but are noisier; lower values are steadier.
+#   cooldown_batches
+#       Minimum number of batches between adjustments.  Prevents the tuner
+#       from thrashing on a single bursty sample.
+
+
+class AdaptiveBatchConfig:
+    """Configuration for :class:`AdaptiveBatchTuner`.
+
+    All fields have sensible defaults so the tuner can be constructed with no
+    arguments.  See the module docstring for a description of each knob.
+    """
+
+    def __init__(
+        self,
+        *,
+        min_batch_size: int = 1,
+        max_batch_size: int = 256,
+        initial_batch_size: int | None = None,
+        target_latency_ms: float = 50.0,
+        queue_high_watermark: int = 32,
+        queue_low_watermark: int = 4,
+        step_fraction: float = 0.25,
+        smoothing: float = 0.3,
+        cooldown_batches: int = 3,
+    ) -> None:
+        if min_batch_size < 1:
+            raise ValueError("min_batch_size must be >= 1")
+        if max_batch_size < min_batch_size:
+            raise ValueError("max_batch_size must be >= min_batch_size")
+        if queue_low_watermark > queue_high_watermark:
+            raise ValueError("queue_low_watermark must be <= queue_high_watermark")
+        if not 0.0 < step_fraction <= 1.0:
+            raise ValueError("step_fraction must be in (0, 1]")
+        if not 0.0 < smoothing <= 1.0:
+            raise ValueError("smoothing must be in (0, 1]")
+
+        self.min_batch_size = min_batch_size
+        self.max_batch_size = max_batch_size
+        self.initial_batch_size = (
+            initial_batch_size
+            if initial_batch_size is not None
+            else max(min_batch_size, min(max_batch_size, 8))
+        )
+        self.target_latency_ms = target_latency_ms
+        self.queue_high_watermark = queue_high_watermark
+        self.queue_low_watermark = queue_low_watermark
+        self.step_fraction = step_fraction
+        self.smoothing = smoothing
+        self.cooldown_batches = cooldown_batches
+
+
+class AdaptiveBatchTuner:
+    """Adaptively tune a batch size from observed latency and queue depth.
+
+    Usage::
+
+        tuner = AdaptiveBatchTuner(AdaptiveBatchConfig(target_latency_ms=40))
+        while running:
+            batch = tuner.current_batch_size
+            latency_ms, queue_depth = run_one_batch(batch)
+            tuner.observe(latency_ms=latency_ms, queue_depth=queue_depth)
+
+    The tuner is deliberately dependency-free and side-effect-free apart from
+    its own state, so it can be unit-tested and embedded anywhere.
+    """
+
+    def __init__(self, config: AdaptiveBatchConfig | None = None) -> None:
+        self.config = config or AdaptiveBatchConfig()
+        self._batch_size = self.config.initial_batch_size
+        self._smoothed_latency_ms: float | None = None
+        self._batches_since_change = 0
+        self._adjustments = 0
+
+    @property
+    def current_batch_size(self) -> int:
+        """The batch size to use for the next batch."""
+        return self._batch_size
+
+    @property
+    def smoothed_latency_ms(self) -> float | None:
+        """Exponentially-smoothed recent latency, or ``None`` before any data."""
+        return self._smoothed_latency_ms
+
+    @property
+    def adjustments(self) -> int:
+        """Number of times the batch size has been changed."""
+        return self._adjustments
+
+    def observe(self, *, latency_ms: float, queue_depth: int) -> int:
+        """Record one batch's latency and queue depth; return the new batch size.
+
+        Args:
+            latency_ms: Wall-clock latency of the batch that just completed.
+            queue_depth: Number of items waiting to be scored at observation
+                time.
+
+        Returns:
+            The (possibly updated) batch size for the next batch.
+        """
+        cfg = self.config
+
+        # Exponential moving average of latency to damp measurement noise.
+        if self._smoothed_latency_ms is None:
+            self._smoothed_latency_ms = latency_ms
+        else:
+            self._smoothed_latency_ms = (
+                cfg.smoothing * latency_ms
+                + (1.0 - cfg.smoothing) * self._smoothed_latency_ms
+            )
+
+        self._batches_since_change += 1
+        if self._batches_since_change < cfg.cooldown_batches:
+            return self._batch_size
+
+        direction = self._decide_direction(queue_depth)
+        if direction == 0:
+            return self._batch_size
+
+        step = max(1, int(round(self._batch_size * cfg.step_fraction)))
+        new_size = self._batch_size + direction * step
+        new_size = max(cfg.min_batch_size, min(cfg.max_batch_size, new_size))
+
+        if new_size != self._batch_size:
+            self._batch_size = new_size
+            self._adjustments += 1
+            self._batches_since_change = 0
+
+        return self._batch_size
+
+    def _decide_direction(self, queue_depth: int) -> int:
+        """Return +1 to grow, -1 to shrink, or 0 to hold.
+
+        Latency and queue depth are combined with hysteresis so that a single
+        bursty sample cannot flip the direction.  The queue-depth dead zone
+        (between the low and high watermarks) suppresses changes when the
+        system is neither starved nor saturated.
+        """
+        cfg = self.config
+        latency = self._smoothed_latency_ms or 0.0
+
+        latency_high = latency > cfg.target_latency_ms
+        latency_low = latency < cfg.target_latency_ms * 0.5
+
+        queue_high = queue_depth >= cfg.queue_high_watermark
+        queue_low = queue_depth <= cfg.queue_low_watermark
+
+        # Saturated queue and latency still under target: grow to raise
+        # throughput.  This is the common "model is fast, feed it more" case.
+        if queue_high and not latency_high:
+            return 1
+
+        # Latency over target: shrink regardless of queue, we are too slow.
+        if latency_high:
+            return -1
+
+        # Starved queue and latency well under target: shrink to reduce
+        # per-batch latency and improve responsiveness.
+        if queue_low and latency_low:
+            return -1
+
+        # Dead zone: hold steady.
+        return 0
+
+    def reset(self) -> None:
+        """Reset the tuner to its initial batch size and clear history."""
+        self._batch_size = self.config.initial_batch_size
+        self._smoothed_latency_ms = None
+        self._batches_since_change = 0
+        self._adjustments = 0
+
+
+def benchmark_adaptive_vs_static(
+    model_profiles: dict[str, dict[str, float]],
+    *,
+    static_batch_size: int = 8,
+    config: AdaptiveBatchConfig | None = None,
+    batches: int = 200,
+) -> dict[str, dict[str, float]]:
+    """Compare adaptive batching against a static batch size.
+
+    This is a lightweight, deterministic simulation used to sanity-check the
+    tuner across model types with different latency/throughput profiles.  Each
+    profile describes a model as ``{"base_latency_ms": ..., "per_item_ms": ...}``
+    where ``base_latency_ms`` is the fixed per-batch overhead and
+    ``per_item_ms`` is the marginal cost of each additional item.
+
+    Args:
+        model_profiles: Mapping of model name to its latency profile.
+        static_batch_size: The hand-tuned static batch size to compare against.
+        config: Adaptive tuner configuration (defaults used if omitted).
+        batches: Number of simulated batches per strategy.
+
+    Returns:
+        Mapping of model name to a dict with ``static_throughput``,
+        ``adaptive_throughput``, ``static_mean_latency_ms``,
+        ``adaptive_mean_latency_ms``, and ``adaptive_batch_size``.
+    """
+    results: dict[str, dict[str, float]] = {}
+
+    for name, profile in model_profiles.items():
+        base = float(profile.get("base_latency_ms", 5.0))
+        per_item = float(profile.get("per_item_ms", 0.5))
+
+        def latency_for(batch_size: int) -> float:
+            return base + per_item * batch_size
+
+        # Static baseline
+        static_latencies = [latency_for(static_batch_size) for _ in range(batches)]
+        static_items = static_batch_size * batches
+        static_total_ms = sum(static_latencies)
+
+        # Adaptive run
+        tuner = AdaptiveBatchTuner(config or AdaptiveBatchConfig())
+        adaptive_latencies: list[float] = []
+        adaptive_items = 0
+        for _ in range(batches):
+            size = tuner.current_batch_size
+            lat = latency_for(size)
+            adaptive_latencies.append(lat)
+            adaptive_items += size
+            # Simulate a queue that grows when the model is fast relative to
+            # the target latency and drains when it is slow.
+            queue_depth = max(0, int(round((tuner.config.target_latency_ms - lat) / 2)))
+            tuner.observe(latency_ms=lat, queue_depth=queue_depth)
+
+        adaptive_total_ms = sum(adaptive_latencies)
+
+        results[name] = {
+            "static_throughput": round(static_items / (static_total_ms / 1000.0), 2),
+            "adaptive_throughput": round(adaptive_items / (adaptive_total_ms / 1000.0), 2),
+            "static_mean_latency_ms": round(static_total_ms / batches, 3),
+            "adaptive_mean_latency_ms": round(adaptive_total_ms / batches, 3),
+            "adaptive_batch_size": float(tuner.current_batch_size),
+        }
+
+    return results
 # End-to-end throughput benchmark
 # ---------------------------------------------------------------------------
 

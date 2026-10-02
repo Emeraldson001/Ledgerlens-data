@@ -513,6 +513,23 @@ A: No, replay uses no-op dispatcher. Live alerts continue unaffected.
 - [Feature Engineering](../detection/feature_engineering.py) - Feature computation
 
 
+## Graceful shutdown & in-flight draining (#892)
+
+`KafkaWorker.install_signal_handlers()` routes SIGTERM/SIGINT to
+`request_shutdown()`. On signal the worker:
+
+1. Stops polling for new messages.
+2. Finishes the in-flight message — scoring, dispatch, dedup-key commit and a
+   **synchronous** offset commit all happen inside `process_message`.
+3. Closes the consumer (flushing the DLQ producer) and exits.
+
+**Drain timeout:** `KAFKA_DRAIN_TIMEOUT_SECONDS` (default `30`, or the
+`drain_timeout=` constructor arg; `0` disables). If the in-flight message is not
+finished in time the process exits with code `75` **without** committing that
+offset. The message is redelivered on restart and the staged-but-uncommitted
+dedup key (`pipeline/exactly_once.py`) prevents double-processing, so the
+fallback never loses or duplicates a message. Set Kubernetes
+`terminationGracePeriodSeconds` above the drain timeout.
 ## Recovery: Horizon history pruned after extended downtime (Issue #904)
 
 **Symptom:** `CRITICAL HORIZON_HISTORY_GAP pair=... watermark=... oldest_available=...`
